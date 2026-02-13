@@ -353,6 +353,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         {
             Log("--- Cold run (fresh connection) ---");
             Connection cold_con(db);
+            cold_con.Query("SET memory_limit = '50%';");
 
             // Ensure PAC is disabled
             auto unset_result = cold_con.Query("ALTER PAC TABLE hits DROP PROTECTED (UserID, ClientIP);");
@@ -382,6 +383,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
             Connection run_con(db);
+            run_con.Query("SET memory_limit = '50%';");
 
             // Ensure PAC is disabled for this connection
             run_con.Query("ALTER TABLE hits UNSET PAC;");
@@ -463,6 +465,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
             Connection run_con(db);
+            run_con.Query("SET memory_limit = '50%';");
 
             for (size_t q = 0; q < queries.size(); ++q) {
                 int qnum = static_cast<int>(q + 1);
