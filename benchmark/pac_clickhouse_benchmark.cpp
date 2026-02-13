@@ -215,7 +215,12 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         }
 
         DuckDB db(db_actual.c_str());
-        Connection con(db);
+
+        // Set memory limit at database level to prevent OOM
+        {
+            Connection config_con(db);
+            config_con.Query("SET memory_limit = '50%';");
+        }
 
         // Find query files
         string create_sql_path = queries_dir + "/create.sql";
@@ -260,71 +265,74 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
         Log(string("Found ") + std::to_string(queries.size()) + " queries to benchmark");
 
-        // Check if table already exists and has data
-        auto check_result = con.Query("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'hits'");
-        bool table_exists = false;
-        if (check_result && !check_result->HasError()) {
-            auto chunk = check_result->Fetch();
-            if (chunk && chunk->size() > 0) {
-                auto count = chunk->GetValue(0, 0).GetValue<int64_t>();
-                table_exists = (count > 0);
-            }
-        }
+        // Setup phase - use a scoped connection that gets destroyed after setup
+        {
+            Connection con(db);
 
-        // If table exists, check if it has any rows
-        bool needs_reload = false;
-        if (table_exists) {
-            auto row_count_result = con.Query("SELECT COUNT(*) FROM hits");
-            if (row_count_result && !row_count_result->HasError()) {
-                auto chunk = row_count_result->Fetch();
+            // Check if table already exists and has data
+            auto check_result = con.Query("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'hits'");
+            bool table_exists = false;
+            if (check_result && !check_result->HasError()) {
+                auto chunk = check_result->Fetch();
                 if (chunk && chunk->size() > 0) {
-                    auto row_count = chunk->GetValue(0, 0).GetValue<int64_t>();
-                    Log(string("hits table has ") + std::to_string(row_count) + " rows");
-                    if (row_count == 0) {
-                        Log("Table is empty, will reload data");
-                        needs_reload = true;
+                    auto count = chunk->GetValue(0, 0).GetValue<int64_t>();
+                    table_exists = (count > 0);
+                }
+            }
+
+            // If table exists, check if it has any rows
+            bool needs_reload = false;
+            if (table_exists) {
+                auto row_count_result = con.Query("SELECT COUNT(*) FROM hits");
+                if (row_count_result && !row_count_result->HasError()) {
+                    auto chunk = row_count_result->Fetch();
+                    if (chunk && chunk->size() > 0) {
+                        auto row_count = chunk->GetValue(0, 0).GetValue<int64_t>();
+                        Log(string("hits table has ") + std::to_string(row_count) + " rows");
+                        if (row_count == 0) {
+                            Log("Table is empty, will reload data");
+                            needs_reload = true;
+                        }
                     }
                 }
             }
-        }
 
-        if (!table_exists || needs_reload) {
-            if (!table_exists) {
-                // Create table
-                Log("Creating hits table...");
-                auto create_result = con.Query(create_sql);
-                if (create_result && create_result->HasError()) {
-                    throw std::runtime_error("Failed to create table: " + create_result->GetError());
+            if (!table_exists || needs_reload) {
+                if (!table_exists) {
+                    // Create table
+                    Log("Creating hits table...");
+                    auto create_result = con.Query(create_sql);
+                    if (create_result && create_result->HasError()) {
+                        throw std::runtime_error("Failed to create table: " + create_result->GetError());
+                    }
                 }
+
+                // Load data - replace placeholder with actual parquet path
+                Log("Loading data into hits table... (this may take a while)");
+                string actual_load_sql = load_sql;
+
+                // Replace 'hits.parquet' placeholder with actual path
+                std::regex parquet_regex("'hits\\.parquet'");
+                actual_load_sql = std::regex_replace(actual_load_sql, parquet_regex, "'" + parquet_path + "'");
+
+                // If micro mode, add LIMIT 5000000 to the SELECT statement
+                if (micro) {
+                    Log("Micro mode: limiting data load to 5m rows");
+                    std::regex from_parquet_regex("(FROM\\s+read_parquet\\([^)]+\\)[^;]*)");
+                    actual_load_sql = std::regex_replace(actual_load_sql, from_parquet_regex, "$1 LIMIT 5000000");
+                }
+
+                Log(string("Executing load SQL: ") + actual_load_sql.substr(0, 200) + "...");
+
+                auto load_result = con.Query(actual_load_sql);
+                if (load_result && load_result->HasError()) {
+                    throw std::runtime_error("Failed to load data: " + load_result->GetError());
+                }
+                Log("Data loading complete.");
+            } else {
+                Log("hits table already exists, skipping creation and loading.");
             }
-
-            // Load data - replace placeholder with actual parquet path
-            Log("Loading data into hits table... (this may take a while)");
-            string actual_load_sql = load_sql;
-
-            // Replace 'hits.parquet' placeholder with actual path
-            std::regex parquet_regex("'hits\\.parquet'");
-            actual_load_sql = std::regex_replace(actual_load_sql, parquet_regex, "'" + parquet_path + "'");
-
-            // If micro mode, add LIMIT 5000000 to the SELECT statement
-            if (micro) {
-                Log("Micro mode: limiting data load to 5m rows");
-                // Insert LIMIT 5000000 before the final semicolon or at the end of FROM clause
-                // Pattern: match the read_parquet(...) and add LIMIT after it
-                std::regex from_parquet_regex("(FROM\\s+read_parquet\\([^)]+\\)[^;]*)");
-                actual_load_sql = std::regex_replace(actual_load_sql, from_parquet_regex, "$1 LIMIT 5000000");
-            }
-
-            Log(string("Executing load SQL: ") + actual_load_sql.substr(0, 200) + "...");
-
-            auto load_result = con.Query(actual_load_sql);
-            if (load_result && load_result->HasError()) {
-                throw std::runtime_error("Failed to load data: " + load_result->GetError());
-            }
-            Log("Data loading complete.");
-        } else {
-            Log("hits table already exists, skipping creation and loading.");
-        }
+        } // Setup connection destroyed here
 
         // Prepare output CSV
         string actual_out = out_csv;
