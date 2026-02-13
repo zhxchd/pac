@@ -216,12 +216,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
         DuckDB db(db_actual.c_str());
 
-        // Set memory limit at database level to prevent OOM
-        {
-            Connection config_con(db);
-            config_con.Query("SET memory_limit = '50%';");
-        }
-
         // Find query files
         string create_sql_path = queries_dir + "/create.sql";
         string load_sql_path = queries_dir + "/load.sql";
@@ -265,7 +259,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
         Log(string("Found ") + std::to_string(queries.size()) + " queries to benchmark");
 
-        // Setup phase - use a scoped connection that gets destroyed after setup
+        // Setup phase - ensure table exists
         {
             Connection con(db);
 
@@ -299,7 +293,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
             if (!table_exists || needs_reload) {
                 if (!table_exists) {
-                    // Create table
                     Log("Creating hits table...");
                     auto create_result = con.Query(create_sql);
                     if (create_result && create_result->HasError()) {
@@ -307,15 +300,12 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     }
                 }
 
-                // Load data - replace placeholder with actual parquet path
                 Log("Loading data into hits table... (this may take a while)");
                 string actual_load_sql = load_sql;
 
-                // Replace 'hits.parquet' placeholder with actual path
                 std::regex parquet_regex("'hits\\.parquet'");
                 actual_load_sql = std::regex_replace(actual_load_sql, parquet_regex, "'" + parquet_path + "'");
 
-                // If micro mode, add LIMIT 5000000 to the SELECT statement
                 if (micro) {
                     Log("Micro mode: limiting data load to 5m rows");
                     std::regex from_parquet_regex("(FROM\\s+read_parquet\\([^)]+\\)[^;]*)");
@@ -332,7 +322,11 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             } else {
                 Log("hits table already exists, skipping creation and loading.");
             }
-        } // Setup connection destroyed here
+
+            // Ensure PAC is disabled initially
+            con.Query("ALTER PAC TABLE hits DROP PROTECTED (UserID, ClientIP);");
+            con.Query("ALTER TABLE hits UNSET PAC;");
+        }
 
         // Prepare output CSV
         string actual_out = out_csv;
@@ -348,183 +342,120 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         if (!csv.is_open()) {
             throw std::runtime_error("Failed to open output CSV: " + actual_out);
         }
-        csv << "query,mode,run,time_ms,success,error\n";
 
         vector<BenchmarkQueryResult> all_results;
 
         // =====================================================================
-        // Phase 1: Baseline runs (no PAC)
+        // Main benchmark loop: For each run, iterate through all queries
+        // doing: q1 cold, q1 warm, q1 pac, q2 cold, q2 warm, q2 pac, ...
+        // Each query uses a single connection for cold/warm/pac sequence
         // =====================================================================
-        Log("=== Phase 1: Baseline runs (no PAC) ===");
+        Log("=== Starting per-run benchmark ===");
 
-        // Cold run - use a fresh connection
-        {
-            Log("--- Cold run (fresh connection) ---");
-            Connection cold_con(db);
-            cold_con.Query("SET memory_limit = '50%';");
-
-            // Ensure PAC is disabled
-            auto unset_result = cold_con.Query("ALTER PAC TABLE hits DROP PROTECTED (UserID, ClientIP);");
-            if (unset_result && unset_result->HasError()) {
-                Log(string("Note: Could not drop PROTECTED columns (may not exist): ") + unset_result->GetError());
-            }
-            unset_result = cold_con.Query("ALTER TABLE hits UNSET PAC;");
-            if (unset_result && unset_result->HasError()) {
-                Log(string("Note: Could not UNSET PAC (may not be set): ") + unset_result->GetError());
-            }
+        int num_runs = 3;
+        for (int run = 1; run <= num_runs; ++run) {
+            Log(string("=== Run ") + std::to_string(run) + " of " + std::to_string(num_runs) + " ===");
 
             for (size_t q = 0; q < queries.size(); ++q) {
                 int qnum = static_cast<int>(q + 1);
-                Log(string("Cold run Q") + std::to_string(qnum));
-                auto r = cold_con.Query(queries[q]);
-                if (r && r->HasError()) {
-                    Log(string("Cold run Q") + std::to_string(qnum) + " error: " + r->GetError());
-                }
-            }
-        } // cold_con destroyed here, releasing memory
+                const string &query = queries[q];
 
-        // Warm runs (3 times) - each run gets a fresh connection
-        for (int run = 1; run <= 3; ++run) {
-            Log(string("--- Baseline warm run ") + std::to_string(run) + " (fresh connection) ---");
+                // Open connection for this query's cold/warm/pac sequence
+                Connection con(db);
 
-            // Small delay between runs
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-            Connection run_con(db);
-            run_con.Query("SET memory_limit = '50%';");
-
-            // Ensure PAC is disabled for this connection
-            run_con.Query("ALTER TABLE hits UNSET PAC;");
-
-            for (size_t q = 0; q < queries.size(); ++q) {
-                int qnum = static_cast<int>(q + 1);
-
-                auto t0 = std::chrono::steady_clock::now();
-                auto r = run_con.Query(queries[q]);
-                auto t1 = std::chrono::steady_clock::now();
-                double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-                BenchmarkQueryResult result;
-                result.query_num = qnum;
-                result.mode = "baseline";
-                result.run = run;
-                result.time_ms = time_ms;
-                result.success = !(r && r->HasError());
-                result.error_msg = (r && r->HasError()) ? r->GetError() : "";
-
-                all_results.push_back(result);
-
-                if (result.success) {
-                    Log(string("Q") + std::to_string(qnum) + " run " + std::to_string(run) +
-                        " time: " + FormatNumber(time_ms) + " ms");
-                } else {
-                    Log(string("Q") + std::to_string(qnum) + " run " + std::to_string(run) +
-                        " ERROR: " + result.error_msg);
-                }
-
-                csv << qnum << ",baseline," << run << "," << FormatNumber(time_ms) << ","
-                    << (result.success ? "true" : "false") << ",\""
-                    << (result.error_msg.empty() ? "" : result.error_msg) << "\"\n";
-            }
-        } // run_con destroyed here, releasing memory
-
-        // =====================================================================
-        // Phase 2: Add PAC protection
-        // =====================================================================
-        Log("=== Phase 2: Adding PAC protection ===");
-
-        {
-            Connection setup_con(db);
-
-            // Add PAC table
-            Log("Marking hits table as a PAC table...");
-            auto pac_result = setup_con.Query("ALTER TABLE hits SET PAC;");
-            if (pac_result && pac_result->HasError()) {
-                Log(string("Warning: Failed to mark table as PAC: ") + pac_result->GetError());
-            }
-
-            // Add PROTECTED columns annotation
-            Log("Adding UserID and ClientIP as protected columns...");
-            pac_result = setup_con.Query("ALTER PAC TABLE hits ADD PROTECTED (UserID, ClientIP);");
-            if (pac_result && pac_result->HasError()) {
-                Log(string("Warning: Failed to add PROTECTED columns: ") + pac_result->GetError());
-                Log("Attempting to mark table as PAC privacy unit...");
-                pac_result = setup_con.Query("ALTER TABLE hits SET PAC;");
-                if (pac_result && pac_result->HasError()) {
-                    Log(string("Warning: Failed to SET PAC: ") + pac_result->GetError());
-                }
-            }
-
-            Log("PAC protection configured.");
-        }
-
-        // =====================================================================
-        // Phase 3: PAC runs
-        // =====================================================================
-        Log("=== Phase 3: PAC runs ===");
-
-        int pac_success_count = 0;
-        int pac_rejected_count = 0;
-        int pac_crash_count = 0;
-
-        for (int run = 1; run <= 3; ++run) {
-            Log(string("--- PAC run ") + std::to_string(run) + " (fresh connection) ---");
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-            Connection run_con(db);
-            run_con.Query("SET memory_limit = '50%';");
-
-            for (size_t q = 0; q < queries.size(); ++q) {
-                int qnum = static_cast<int>(q + 1);
-
-                auto t0 = std::chrono::steady_clock::now();
-                auto r = run_con.Query(queries[q]);
-                auto t1 = std::chrono::steady_clock::now();
-                double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-                BenchmarkQueryResult result;
-                result.query_num = qnum;
-                result.mode = "PAC";
-                result.run = run;
-                result.time_ms = time_ms;
-                result.success = !(r && r->HasError());
-                result.error_msg = (r && r->HasError()) ? r->GetError() : "";
-
-                all_results.push_back(result);
-
-                if (result.success) {
-                    pac_success_count++;
-                    Log(string("Q") + std::to_string(qnum) + " run " + std::to_string(run) +
-                        " time: " + FormatNumber(time_ms) + " ms");
-                } else {
-                    // Check if it's a PAC rejection or a crash/other error
-                    if (result.error_msg.find("PAC") != string::npos ||
-                        result.error_msg.find("privacy") != string::npos ||
-                        result.error_msg.find("aggregat") != string::npos ||
-                        result.error_msg.find("protected") != string::npos) {
-                        pac_rejected_count++;
-                        Log(string("Q") + std::to_string(qnum) + " run " + std::to_string(run) +
-                            " REJECTED by PAC: " + result.error_msg);
-                    } else {
-                        pac_crash_count++;
-                        Log(string("Q") + std::to_string(qnum) + " run " + std::to_string(run) +
-                            " CRASH/ERROR: " + result.error_msg);
+                // ------------------------------------------------------------------
+                // Cold run (baseline, not recorded)
+                // ------------------------------------------------------------------
+                {
+                    con.Query("ALTER TABLE hits UNSET PAC;");  // Ensure no PAC
+                    Log(string("Q") + std::to_string(qnum) + " cold run");
+                    auto r = con.Query(query);
+                    if (r && r->HasError()) {
+                        Log(string("Q") + std::to_string(qnum) + " cold run error: " + r->GetError());
                     }
                 }
 
-                csv << qnum << ",PAC," << run << "," << FormatNumber(time_ms) << ","
-                    << (result.success ? "true" : "false") << ",\""
-                    << (result.error_msg.empty() ? "" : result.error_msg) << "\"\n";
-            }
-        } // run_con destroyed here, releasing memory
+                // ------------------------------------------------------------------
+                // Warm run (baseline, recorded)
+                // ------------------------------------------------------------------
+                {
+                    con.Query("ALTER TABLE hits UNSET PAC;");  // Ensure no PAC
 
-        csv.close();
-        Log(string("Results written to: ") + actual_out);
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto r = con.Query(query);
+                    auto t1 = std::chrono::steady_clock::now();
+                    double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+                    BenchmarkQueryResult result;
+                    result.query_num = qnum;
+                    result.mode = "baseline";
+                    result.run = run;
+                    result.time_ms = time_ms;
+                    result.success = !(r && r->HasError());
+                    result.error_msg = (r && r->HasError()) ? r->GetError() : "";
+
+                    all_results.push_back(result);
+
+                    if (result.success) {
+                        Log(string("Q") + std::to_string(qnum) + " baseline run " + std::to_string(run) +
+                            " time: " + FormatNumber(time_ms) + " ms");
+                    } else {
+                        Log(string("Q") + std::to_string(qnum) + " baseline run " + std::to_string(run) +
+                            " ERROR: " + result.error_msg);
+                    }
+                }
+
+                // ------------------------------------------------------------------
+                // PAC run (recorded)
+                // ------------------------------------------------------------------
+                {
+                    // Enable PAC for this query
+                    con.Query("ALTER TABLE hits SET PAC;");
+                    con.Query("ALTER PAC TABLE hits ADD PROTECTED (UserID, ClientIP);");
+
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto r = con.Query(query);
+                    auto t1 = std::chrono::steady_clock::now();
+                    double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+                    BenchmarkQueryResult result;
+                    result.query_num = qnum;
+                    result.mode = "PAC";
+                    result.run = run;
+                    result.time_ms = time_ms;
+                    result.success = !(r && r->HasError());
+                    result.error_msg = (r && r->HasError()) ? r->GetError() : "";
+
+                    all_results.push_back(result);
+
+                    if (result.success) {
+                        Log(string("Q") + std::to_string(qnum) + " PAC run " + std::to_string(run) +
+                            " time: " + FormatNumber(time_ms) + " ms");
+                    } else {
+                        // Check if it's a PAC rejection or a crash/other error
+                        if (result.error_msg.find("PAC") != string::npos ||
+                            result.error_msg.find("privacy") != string::npos ||
+                            result.error_msg.find("aggregat") != string::npos ||
+                            result.error_msg.find("protected") != string::npos) {
+                            Log(string("Q") + std::to_string(qnum) + " PAC run " + std::to_string(run) +
+                                " REJECTED: " + result.error_msg);
+                        } else {
+                            Log(string("Q") + std::to_string(qnum) + " PAC run " + std::to_string(run) +
+                                " ERROR: " + result.error_msg);
+                        }
+                    }
+
+                    // Disable PAC after the run
+                    con.Query("ALTER PAC TABLE hits DROP PROTECTED (UserID, ClientIP);");
+                    con.Query("ALTER TABLE hits UNSET PAC;");
+                }
+
+                // Connection closed here when con goes out of scope
+            }
+        }
 
         // =====================================================================
-        // Post-process: If any PAC run of a query has "sample diversity" error,
-        // mark all runs of that query as failed
+        // Post-process: Detect unstable queries
         // =====================================================================
         std::set<int> unstable_queries;
         for (const auto &r : all_results) {
@@ -535,20 +466,32 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             }
         }
         if (!unstable_queries.empty()) {
-            Log("Detected unstable queries (sample diversity errors), marking all their runs as failed:");
+            Log("Detected unstable queries (sample diversity errors):");
             for (int qnum : unstable_queries) {
                 Log(string("  Q") + std::to_string(qnum));
             }
-            // Mark all PAC runs of these queries as failed
             for (auto &r : all_results) {
                 if (r.mode == "PAC" && unstable_queries.count(r.query_num) > 0) {
                     if (r.success) {
                         r.success = false;
-                        r.error_msg = "Marked failed due to sample diversity instability in other runs";
+                        r.error_msg = "Marked failed due to sample diversity instability";
                     }
                 }
             }
         }
+
+        // =====================================================================
+        // Write CSV after all processing (including unstable query fixes)
+        // =====================================================================
+        csv << "query,mode,run,time_ms,success,error\n";
+        for (const auto &r : all_results) {
+            csv << r.query_num << "," << r.mode << "," << r.run << ","
+                << FormatNumber(r.time_ms) << ","
+                << (r.success ? "true" : "false") << ",\""
+                << (r.error_msg.empty() ? "" : r.error_msg) << "\"\n";
+        }
+        csv.close();
+        Log(string("Results written to: ") + actual_out);
 
         // =====================================================================
         // Print Statistics
@@ -557,7 +500,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
         int total_queries = static_cast<int>(queries.size());
 
-        // Count baseline successes and compute average time per run
         int baseline_success = 0;
         int baseline_failed = 0;
         double baseline_total_time = 0;
@@ -572,12 +514,11 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             }
         }
 
-        // PAC stats with error message counting
         int pac_success = 0;
         int pac_rejected = 0;
         int pac_crashed = 0;
         double pac_total_time = 0;
-        std::map<string, int> error_counts;  // Count occurrences of each error type
+        std::map<string, int> error_counts;
 
         for (const auto &r : all_results) {
             if (r.mode == "PAC") {
@@ -585,7 +526,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     pac_success++;
                     pac_total_time += r.time_ms;
                 } else {
-                    // Categorize error and count
                     string error_category;
                     if (r.error_msg.find("sample diversity") != string::npos) {
                         error_category = "sample diversity instability";
@@ -611,8 +551,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             }
         }
 
-        // Compute averages per run (3 runs)
-        int num_runs = 3;
         double baseline_avg_success_per_run = static_cast<double>(baseline_success) / num_runs;
         double baseline_avg_failed_per_run = static_cast<double>(baseline_failed) / num_runs;
         double baseline_avg_time_per_run = baseline_total_time / num_runs;
@@ -644,7 +582,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 FormatNumber(pac_total_time / pac_success) + " ms");
         }
 
-        // Print error category breakdown (averaged per run)
         if (!error_counts.empty()) {
             Log("--- Error breakdown (per run average) ---");
             for (const auto &ec : error_counts) {
@@ -653,7 +590,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             }
         }
 
-        // Compute overhead
         if (baseline_success > 0 && pac_success > 0) {
             double baseline_avg_per_query = baseline_total_time / baseline_success;
             double pac_avg_per_query = pac_total_time / pac_success;
