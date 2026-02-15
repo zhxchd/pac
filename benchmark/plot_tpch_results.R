@@ -201,13 +201,14 @@ p <- p +
     legend.position = "top",
     legend.title = element_blank(),
     legend.text = element_text(size = 28),
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.margin = margin(0, 0, -15, 0),
     axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
     axis.text.y = element_text(size = 28),
-    axis.title.x = element_text(size = 32),
-    axis.title.y = element_text(size = 32),
-    plot.title = element_text(size = 44, face = "bold", hjust = 0.5)
-  ) +
-  ggtitle(plot_title)
+    axis.title = element_blank(),
+    plot.title = element_blank(),
+    plot.margin = margin(5, 5, 5, 5)
+  )
 
 sf_for_name <- ifelse(is.na(sf_str), "unknown", gsub("\\.", "_", sf_str))
 out_file <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, ".png"))
