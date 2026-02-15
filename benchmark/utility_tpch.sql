@@ -1,65 +1,50 @@
 set pac_diffcols = '2:q01.csv';
-.read 'benchmark/tpch_pac_queries/q01.sql'
+pragma tpch(1);
 
 set pac_diffcols = '1:q04.csv';
-.read 'benchmark/tpch_pac_queries/q04.sql'
+pragma tpch(4);
 
 set pac_diffcols = '1:q05.csv';
-.read 'benchmark/tpch_pac_queries/q05.sql'
+pragma tpch(5);
 
 set pac_diffcols = '0:q06.csv';
-.read 'benchmark/tpch_pac_queries/q06.sql'
+pragma tpch(6);
 
 set pac_diffcols = '3:q07.csv';
-.read 'benchmark/tpch_pac_queries/q07.sql'
+pragma tpch(7);
 
 set pac_diffcols = '1:q08.csv';
-.read 'benchmark/tpch_pac_queries/q08.sql'
-
-set pac_diffcols = '1:q08-nolambda.csv';
-.read 'benchmark/tpch_pac_queries/q08-nolambda.sql'
+pragma tpch(8);
 
 set pac_diffcols = '2:q09.csv';
-.read 'benchmark/tpch_pac_queries/q09.sql'
+pragma tpch(9);
 
 set pac_diffcols = '1:q11.csv';
-.read 'benchmark/tpch_pac_queries/q11.sql'
+pragma tpch(11);
 
 set pac_diffcols = '1:q12.csv';
-.read 'benchmark/tpch_pac_queries/q12.sql'
+pragma tpch(12);
 
 set pac_diffcols = '1:q13.csv';
-.read 'benchmark/tpch_pac_queries/q13.sql'
+pragma tpch(13);
 
 set pac_diffcols = '0:q14.csv';
-.read 'benchmark/tpch_pac_queries/q14.sql'
-
-set pac_diffcols = '0:q14-nolambda.csv';
-.read 'benchmark/tpch_pac_queries/q14-nolambda.sql'
+pragma tpch(14);
 
 set pac_diffcols = '1:q15.csv';
-.read 'benchmark/tpch_pac_queries/q15.sql'
+pragma tpch(15);
 
 set pac_diffcols = '0:q17.csv';
-.read 'benchmark/tpch_pac_queries/q17.sql'
-
-set pac_diffcols = '0:q17-nolambda.csv';
-.read 'benchmark/tpch_pac_queries/q17-nolambda.sql'
+pragma tpch(17);
 
 set pac_diffcols = '0:q19.csv';
-.read 'benchmark/tpch_pac_queries/q19.sql'
+pragma tpch(19);
 
 set pac_diffcols = '1:q20.csv';
-.read 'benchmark/tpch_pac_queries/q20.sql'
-
-set pac_diffcols = '1:q20-nolambda.csv';
-.read 'benchmark/tpch_pac_queries/q20-nolambda.sql'
+pragma tpch(20);
 
 set pac_diffcols = '1:q21.csv';
-.read 'benchmark/tpch_pac_queries/q21.sql'
+pragma tpch(21);
 
 set pac_diffcols = '1:q22.csv';
-.read 'benchmark/tpch_pac_queries/q22.sql'
-
-set pac_diffcols = '1:q22-nolambda.csv';
-.read 'benchmark/tpch_pac_queries/q22-nolambda.sql'
+pragma tpch(22);
