@@ -194,6 +194,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// Add option to set the mi parameter for PAC aggregates (default 1/128)
 	// Controls probabilistic vs deterministic mode for noise/NULL decisions
+	db.config.AddExtensionOption("pac_categorical", "enable categorical query rewrites", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
 	db.config.AddExtensionOption("pac_mi", "mutual information parameter for PAC aggregates", LogicalType::DOUBLE,
 	                             Value::DOUBLE(1.0 / 128));
 	// Add option to set the correction factor for PAC aggregates (default 1.0)
@@ -220,7 +222,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacMinCountersFunctions(loader);
 	RegisterPacMaxCountersFunctions(loader);
 
-	// Register PAC categorical functions (pac_select, pac_filter, pac_mask_and, etc.)
+	// Register PAC categorical functions (pac_select, pac_filter, pac_filter_<cmp>, etc.)
 	RegisterPacCategoricalFunctions(loader);
 
 	// Register PAC parser extension

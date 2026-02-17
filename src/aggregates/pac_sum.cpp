@@ -123,20 +123,21 @@ AUTOVECTORIZE inline void PacSumUpdateOne(ScatterIntState<SIGNED> &state, uint64
 template <bool SIGNED, typename WrapperT, typename ValueT>
 inline void PacSumRouteValue(WrapperT &wrapper, typename WrapperT::State *state, uint64_t hash, ValueT value,
                              ArenaAllocator &a) {
+	if (DUCKDB_LIKELY(hash)) { // skip if hash==0 (helps stability if this happens very often)
 #ifndef PAC_SIGNEDSUM
-	// Double-sided mode: route by sign, track neg_state count separately
-	auto &state_u = *reinterpret_cast<PacSumIntState<false> *>(state);
-	if (SIGNED && value < 0) {
-		auto *neg = wrapper.EnsureNegState(a);
-		neg->update_count++; // track negative value count
-		PacSumUpdateOneInternal<false>(*neg, hash, static_cast<uint64_t>(-value), a);
-	} else {
-		PacSumUpdateOneInternal<false>(state_u, hash, static_cast<uint64_t>(value), a);
-	}
+		// Double-sided mode: route by sign, track neg_state count separately
+		auto &state_u = *reinterpret_cast<PacSumIntState<false> *>(state);
+		if (SIGNED && value < 0) {
+			auto *neg = wrapper.EnsureNegState(a);
+			neg->update_count++; // track negative value count
+			PacSumUpdateOneInternal<false>(*neg, hash, static_cast<uint64_t>(-value), a);
+		} else {
+			PacSumUpdateOneInternal<false>(state_u, hash, static_cast<uint64_t>(value), a);
+		}
 #else
-	// Single-sided mode
-	PacSumUpdateOneInternal<SIGNED>(*state, hash, value, a);
+		PacSumUpdateOneInternal<SIGNED>(*state, hash, value, a); // Single-sided mode
 #endif
+	}
 }
 
 // Double wrapper overload - no double-sided mode needed for floating point

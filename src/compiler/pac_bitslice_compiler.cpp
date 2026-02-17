@@ -2121,7 +2121,9 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// After the standard PAC transformation, check if this is a categorical query
 	// (outer query compares against inner PAC aggregate without its own aggregate).
 	// If so, rewrite to use _counters variants and pac_filter for probabilistic filtering.
-	RewriteCategoricalQuery(input, plan);
+	if (GetBooleanSetting(input.context, "pac_categorical", true)) {
+		RewriteCategoricalQuery(input, plan);
+	}
 
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("=== PAC-OPTIMIZED PLAN ===");
