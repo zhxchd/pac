@@ -444,11 +444,9 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 static uint64_t hash32_32(uint64_t num) {
 	for (int round = 0; round < 16; ++round) {
 		uint64_t next = PAC_HASH_PRIME * (num ^ PAC_HASH_PRIME);
+		uint64_t flip = static_cast<uint64_t>(static_cast<int64_t>(32 - pac_popcount64(num)) >> 63);
+		num ^= flip; // conditionally negate without branching
 		int pop = pac_popcount64(num);
-		if (pop > 32) { // Negate if overfull
-			num = ~num;
-			pop = 64 - pop;
-		}
 		if (pop >= 26) {
 			for (int iter = 0; iter < 10; ++iter) {
 				if (pop == 32) {
