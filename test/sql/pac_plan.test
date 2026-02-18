@@ -1,0 +1,333 @@
+# name: test/sql/pac_plan.test
+# description: Test PAC plan rewriting via EXPLAIN output (regex matching on optimized logical plan)
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# ============================================================
+# Schema setup (TPC-H-like with customer as privacy unit)
+# ============================================================
+
+# Nation table
+statement ok
+CREATE TABLE nation(
+    n_nationkey INTEGER PRIMARY KEY,
+    n_name VARCHAR,
+    n_regionkey INTEGER
+);
+
+statement ok
+INSERT INTO nation VALUES
+    (0, 'FRANCE', 0),
+    (1, 'GERMANY', 0),
+    (2, 'JAPAN', 1),
+    (3, 'CHINA', 1),
+    (4, 'USA', 2);
+
+# Customer table (Privacy Unit)
+statement ok
+CREATE TABLE customer(
+    c_custkey INTEGER PRIMARY KEY,
+    c_name VARCHAR,
+    c_nationkey INTEGER,
+    FOREIGN KEY (c_nationkey) REFERENCES nation(n_nationkey)
+    PROTECTED (c_name)
+);
+
+statement ok
+INSERT INTO customer VALUES
+    (1, 'Customer#001', 0),
+    (2, 'Customer#002', 1),
+    (3, 'Customer#003', 0),
+    (4, 'Customer#004', 1),
+    (5, 'Customer#005', 2),
+    (6, 'Customer#006', 0),
+    (7, 'Customer#007', 1),
+    (8, 'Customer#008', 2);
+
+# Supplier table
+statement ok
+CREATE TABLE supplier(
+    s_suppkey INTEGER PRIMARY KEY,
+    s_name VARCHAR,
+    s_nationkey INTEGER,
+    FOREIGN KEY (s_nationkey) REFERENCES nation(n_nationkey)
+);
+
+statement ok
+INSERT INTO supplier VALUES
+    (1, 'Supplier#001', 0),
+    (2, 'Supplier#002', 1),
+    (3, 'Supplier#003', 0),
+    (4, 'Supplier#004', 1);
+
+# Orders table
+statement ok
+CREATE TABLE orders(
+    o_orderkey INTEGER PRIMARY KEY,
+    o_custkey INTEGER,
+    o_orderdate DATE,
+    o_comment VARCHAR,
+    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+);
+
+statement ok
+INSERT INTO orders VALUES
+    (1, 1, '1995-03-15', 'regular'),
+    (2, 2, '1995-06-20', 'urgent'),
+    (3, 3, '1995-09-10', 'regular'),
+    (4, 4, '1996-01-05', 'regular'),
+    (5, 5, '1996-04-12', 'urgent'),
+    (6, 1, '1996-07-18', 'regular'),
+    (7, 2, '1995-11-22', 'regular'),
+    (8, 3, '1996-03-30', 'urgent'),
+    (9, 6, '1995-05-14', 'regular'),
+    (10, 7, '1996-08-25', 'regular'),
+    (11, 1, '1995-12-01', 'urgent'),
+    (12, 8, '1996-02-17', 'regular');
+
+# Lineitem table
+statement ok
+CREATE TABLE lineitem(
+    l_orderkey INTEGER,
+    l_linenumber INTEGER,
+    l_suppkey INTEGER,
+    l_quantity DECIMAL(15,2),
+    l_extendedprice DECIMAL(15,2),
+    l_discount DECIMAL(15,2),
+    l_shipdate DATE,
+    PRIMARY KEY (l_orderkey, l_linenumber),
+    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey),
+    FOREIGN KEY (l_suppkey) REFERENCES supplier(s_suppkey)
+);
+
+statement ok
+INSERT INTO lineitem VALUES
+    (1, 1, 1, 10.00, 1000.00, 0.05, '1995-03-20'),
+    (1, 2, 2, 15.00, 1500.00, 0.10, '1995-03-22'),
+    (2, 1, 2, 20.00, 2000.00, 0.05, '1995-06-25'),
+    (3, 1, 1, 25.00, 2500.00, 0.00, '1995-09-15'),
+    (4, 1, 3, 30.00, 3000.00, 0.10, '1996-01-10'),
+    (5, 1, 4, 12.00, 1200.00, 0.05, '1996-04-15'),
+    (6, 1, 1, 18.00, 1800.00, 0.00, '1996-07-20'),
+    (7, 1, 2, 22.00, 2200.00, 0.05, '1995-11-25'),
+    (8, 1, 3, 16.00, 1600.00, 0.10, '1996-04-05'),
+    (9, 1, 1, 14.00, 1400.00, 0.05, '1995-05-18'),
+    (10, 1, 4, 20.00, 2000.00, 0.00, '1996-08-28'),
+    (11, 1, 2, 25.00, 2500.00, 0.10, '1995-12-05'),
+    (12, 1, 3, 30.00, 3000.00, 0.05, '1996-02-20');
+
+statement ok
+ALTER TABLE customer SET PU;
+
+# ============================================================
+# EXPLAIN tests with regex matching on optimized plan
+# ============================================================
+
+statement ok
+SET explain_output='optimized_only';
+
+# Test 1: Verify SUM is rewritten to pac_sum
+# PAC compiler should transform SUM() on FK-linked tables to pac_sum()
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    SUM(l_extendedprice * (1 - l_discount)) AS revenue
+FROM
+    lineitem,
+    orders,
+    customer
+WHERE
+    l_orderkey = o_orderkey
+    AND o_custkey = c_custkey
+GROUP BY
+    c_nationkey
+ORDER BY
+    revenue DESC;
+----
+logical_opt	<REGEX>:.*pac_sum.*
+
+# Test 2: Top-K pushdown transforms pac_sum to pac_mean for ORDER BY + LIMIT
+# The optimizer should convert pac_sum to pac_sum_counters and add pac_mean/pac_noised projections
+query II
+EXPLAIN SELECT
+    n_name,
+    SUM(l_extendedprice * (1 - l_discount)) AS revenue
+FROM
+    customer,
+    orders,
+    lineitem,
+    nation
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+    AND c_nationkey = n_nationkey
+GROUP BY
+    n_name
+ORDER BY
+    revenue DESC
+LIMIT 2;
+----
+logical_opt	<REGEX>:.*pac_mean.*
+
+# Test 3: Correlated subquery with COUNT - both inner and outer should be pac_count
+# Outer COUNT(*) groups customers by nation (multiple PUs per group) -> pac_count
+# Inner COUNT(*) is correlated subquery on FK-linked table (orders) -> pac_count
+# The plan should contain pac_count at least twice
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    COUNT(*) AS cust_count
+FROM
+    customer
+WHERE
+    (SELECT COUNT(*) FROM orders WHERE o_custkey = c_custkey) > 1
+GROUP BY
+    c_nationkey;
+----
+logical_opt	<REGEX>:.*pac_count.*pac_count.*
+
+# Test 4: TPC-H Q07-style query with uncorrelated subquery on lineitem
+# The PAC compiler should reuse the existing orders join, not add a redundant one
+# Verify pac_sum appears in the plan (orders should be scanned only once)
+query II
+EXPLAIN SELECT
+    supp_nation,
+    cust_nation,
+    l_year,
+    SUM(volume) AS revenue
+FROM (
+    SELECT
+        n1.n_name AS supp_nation,
+        n2.n_name AS cust_nation,
+        CAST(date_part('year', l_shipdate) AS INTEGER) AS l_year,
+        l_extendedprice * (1 - l_discount) AS volume
+    FROM
+        supplier,
+        lineitem,
+        orders,
+        customer,
+        nation n1,
+        nation n2
+    WHERE
+        s_suppkey = l_suppkey
+        AND o_orderkey = l_orderkey
+        AND c_custkey = o_custkey
+        AND s_nationkey = n1.n_nationkey
+        AND c_nationkey = n2.n_nationkey
+        AND ((n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY')
+            OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE'))
+        AND l_shipdate BETWEEN CAST('1995-01-01' AS DATE) AND CAST('1996-12-31' AS DATE)
+) AS shipping
+GROUP BY
+    supp_nation,
+    cust_nation,
+    l_year
+ORDER BY
+    supp_nation,
+    cust_nation,
+    l_year;
+----
+logical_opt	<REGEX>:.*pac_sum.*
+
+# Test 5: Top-K pushdown with VARCHAR GROUP BY (triggers string decompress projection)
+# DuckDB inserts __internal_decompress_string between TopN and Aggregate for VARCHAR
+# group columns. The rewriter must keep these projections and still produce pac_mean.
+query II
+EXPLAIN SELECT
+    n_name,
+    COUNT(*) AS order_count
+FROM
+    orders,
+    customer,
+    nation
+WHERE
+    o_custkey = c_custkey
+    AND c_nationkey = n_nationkey
+GROUP BY
+    n_name
+ORDER BY
+    order_count DESC
+LIMIT 2;
+----
+logical_opt	<REGEX>:.*pac_mean.*
+
+# Test 6: Top-K pushdown produces pac_noised in the final projection
+# The noised projection should appear above TopN to apply noise only to selected rows
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    SUM(l_extendedprice) AS total_price
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey
+ORDER BY
+    total_price DESC
+LIMIT 3;
+----
+logical_opt	<REGEX>:.*pac_noised.*
+
+# Test 7: Join on top of Top-K subquery
+# When a JOIN sits above a TopN (e.g. subquery with ORDER BY + LIMIT joined to
+# another table), the rewriter recursively walks the plan tree to find the TopN
+# node and applies top-k pushdown. Parent column references are remapped to
+# the NoisedProj output bindings.
+query II
+EXPLAIN SELECT t.c_nationkey, t.total_price, n_name
+FROM (
+    SELECT c_nationkey, SUM(l_extendedprice) AS total_price
+    FROM customer, orders, lineitem
+    WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey
+    GROUP BY c_nationkey
+    ORDER BY total_price DESC
+    LIMIT 3
+) t
+JOIN nation ON t.c_nationkey = n_nationkey;
+----
+logical_opt	<REGEX>:.*pac_mean.*
+
+statement ok
+SET explain_output='physical_only';
+
+# ============================================================
+# Cleanup
+# ============================================================
+
+statement ok
+DROP TABLE lineitem;
+
+statement ok
+DROP TABLE orders;
+
+statement ok
+DROP TABLE supplier;
+
+statement ok
+DROP TABLE customer;
+
+statement ok
+DROP TABLE nation;
+
+statement ok
+PRAGMA clear_pac_metadata;

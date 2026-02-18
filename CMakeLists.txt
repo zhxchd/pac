@@ -54,6 +54,7 @@ set(EXTENSION_SOURCES
     src/categorical/pac_categorical_rewriter.cpp
     src/diff/pac_utility_diff.cpp
     src/diff/pac_utility_summary.cpp
+    src/query_processing/pac_topk_rewriter.cpp
     src/utils/pac_helpers.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

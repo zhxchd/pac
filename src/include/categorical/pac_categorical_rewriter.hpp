@@ -185,6 +185,36 @@ static inline uint64_t HashBinding(const ColumnBinding &binding) {
 	return (uint64_t(binding.table_index) << 32) | binding.column_index;
 }
 
+// Rebind an aggregate function by name (catalog lookup + FunctionBinder).
+// Used by both top-k pushdown (_counters variants) and categorical rewriting.
+static inline unique_ptr<Expression> RebindAggregate(ClientContext &context, const string &func_name,
+                                                     vector<unique_ptr<Expression>> children, bool is_distinct) {
+	auto &catalog = Catalog::GetSystemCatalog(context);
+	auto &func_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(context, DEFAULT_SCHEMA, func_name);
+	vector<LogicalType> arg_types;
+	for (auto &child : children) {
+		arg_types.push_back(child->return_type);
+	}
+	ErrorData error;
+	FunctionBinder function_binder(context);
+	auto best_function = function_binder.BindFunction(func_name, func_entry.functions, arg_types, error);
+	if (!best_function.IsValid()) {
+		return nullptr;
+	}
+	AggregateFunction func = func_entry.functions.GetFunctionByOffset(best_function.GetIndex());
+	return function_binder.BindAggregateFunction(func, std::move(children), nullptr,
+	                                             is_distinct ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT);
+}
+
+// Walk through cast expressions to find the underlying expression.
+// Returns the innermost non-cast expression.
+static inline Expression *StripCasts(Expression *expr) {
+	while (expr->type == ExpressionType::OPERATOR_CAST) {
+		expr = expr->Cast<BoundCastExpression>().child.get();
+	}
+	return expr;
+}
+
 // ==========================================================================================
 // inlined  helper methods for the categorical rewrites
 // ==========================================================================================

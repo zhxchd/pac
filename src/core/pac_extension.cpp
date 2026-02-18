@@ -24,6 +24,7 @@
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
+#include "query_processing/pac_topk_rewriter.hpp"
 #include "pac_debug.hpp"
 
 namespace duckdb {
@@ -169,6 +170,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto pac_drop_table_rule = PACDropTableRule();
 	db.config.optimizer_extensions.push_back(pac_drop_table_rule);
 
+	// Register PAC Top-K pushdown rule (post-optimizer: rewrites TopN over PAC aggregates)
+	auto pac_topk_rule = PACTopKRule();
+	pac_topk_rule.optimizer_info = pac_info;
+	db.config.optimizer_extensions.push_back(pac_topk_rule);
+
 	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)
@@ -207,6 +213,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Add option to enable utility diff mode: number of key columns for matching
 	db.config.AddExtensionOption("pac_diffcols", "key columns and optional output path for utility diff",
 	                             LogicalType::VARCHAR);
+	// Add option to enable top-k pushdown: when true, top-k is applied on true aggregates before noising
+	db.config.AddExtensionOption("pac_pushdown_topk", "apply top-k before noise instead of after", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);
@@ -226,6 +235,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register PAC categorical functions (pac_select, pac_filter, pac_filter_<cmp>, etc.)
 	RegisterPacCategoricalFunctions(loader);
+
+	// Register pac_mean scalar function (used by top-k pushdown for ordering)
+	RegisterPacMeanFunction(loader);
 
 	// Register PAC parser extension
 	db.config.parser_extensions.push_back(PACParserExtension());

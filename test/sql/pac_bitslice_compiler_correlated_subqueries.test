@@ -135,6 +135,36 @@ ORDER BY
 2-HIGH	4
 3-MEDIUM	2
 
+# Test Top-K pushdown with correlated EXISTS subquery (Q4 + LIMIT)
+# The top-k optimizer should rewrite pac_count to pac_count_counters,
+# insert pac_mean for ordering, and apply pac_noised to the final top-k rows
+query II
+SELECT
+    o_orderpriority,
+    count(*) AS order_count
+FROM
+    orders
+WHERE
+    o_orderdate >= CAST('1993-07-01' AS date)
+    AND o_orderdate < CAST('1993-10-01' AS date)
+    AND EXISTS (
+        SELECT
+            *
+        FROM
+            lineitem
+        WHERE
+            l_orderkey = o_orderkey
+            AND l_commitdate < l_receiptdate)
+GROUP BY
+    o_orderpriority
+ORDER BY
+    order_count DESC,
+    o_orderpriority
+LIMIT 2;
+----
+1-URGENT	4
+2-HIGH	4
+
 # Test TPC-H Q17-style correlated subquery with aggregates in both outer and inner queries
 # This tests the case where lineitem (FK-linked table) appears in both outer aggregate and inner aggregate
 # Both aggregates should be transformed to PAC functions

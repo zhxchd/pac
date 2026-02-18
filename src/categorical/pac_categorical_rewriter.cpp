@@ -408,27 +408,6 @@ static bool TracesPacCountersAggregate(Expression *expr, LogicalOperator *plan_r
 	return found;
 }
 
-// Replace standard aggregates that operate on PAC counter results
-// Returns the new BoundAggregateExpression, or nullptr if binding fails.
-static unique_ptr<Expression> RebindAggregate(ClientContext &context, const string &func_name,
-                                              vector<unique_ptr<Expression>> children, bool is_distinct) {
-	auto &catalog = Catalog::GetSystemCatalog(context);
-	auto &func_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(context, DEFAULT_SCHEMA, func_name);
-	vector<LogicalType> arg_types;
-	for (auto &child : children) {
-		arg_types.push_back(child->return_type);
-	}
-	ErrorData error;
-	FunctionBinder function_binder(context);
-	auto best_function = function_binder.BindFunction(func_name, func_entry.functions, arg_types, error);
-	if (!best_function.IsValid()) {
-		return nullptr;
-	}
-	AggregateFunction func = func_entry.functions.GetFunctionByOffset(best_function.GetIndex());
-	return function_binder.BindAggregateFunction(func, std::move(children), nullptr,
-	                                             is_distinct ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT);
-}
-
 // with pac_*_list variants that aggregate element-wise
 static void ReplaceAggregatesOverCounters(LogicalOperator *op, ClientContext &context, LogicalOperator *plan_root) {
 	if (op->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
@@ -932,14 +911,6 @@ static int FindPacChildIndex(Expression *expr, LogicalOperator *plan_root) {
 		return 1;
 	}
 	return -1; // both or neither
-}
-
-// Strip casts from an expression to find the underlying column ref
-static Expression *StripCasts(Expression *expr) {
-	while (expr->type == ExpressionType::OPERATOR_CAST) {
-		expr = expr->Cast<BoundCastExpression>().child.get();
-	}
-	return expr;
 }
 
 /// Try to rewrite a filter comparison into pac_filter_<cmp>(scalar, counters) or
