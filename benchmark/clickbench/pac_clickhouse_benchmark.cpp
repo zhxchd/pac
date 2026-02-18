@@ -4,7 +4,7 @@
 
 // Implement the ClickHouse Hits (ClickBench) benchmark runner.
 
-#include "include/pac_clickhouse_benchmark.hpp"
+#include "pac_clickhouse_benchmark.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"

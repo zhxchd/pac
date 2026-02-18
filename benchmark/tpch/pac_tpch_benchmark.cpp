@@ -4,7 +4,7 @@
 
 // Implement the TPCH benchmark runner.
 
-#include "include/pac_tpch_benchmark.hpp"
+#include "pac_tpch_benchmark.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"

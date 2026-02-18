@@ -2,7 +2,7 @@
 // Created by ila on 1/19/26.
 //
 
-#include "include/pac_tpch_compiler_benchmark.hpp"
+#include "pac_tpch_compiler_benchmark.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
