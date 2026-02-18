@@ -602,11 +602,52 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             }
         }
 
-        if (baseline_success > 0 && pac_success > 0) {
-            double baseline_avg_per_query = baseline_total_time / baseline_success;
-            double pac_avg_per_query = pac_total_time / pac_success;
-            double overhead = (pac_avg_per_query / baseline_avg_per_query - 1.0) * 100.0;
-            Log(string("--- PAC Overhead: ") + FormatNumber(overhead) + "% ---");
+        // =====================================================================
+        // Per-query slowdown (PAC vs baseline, only queries where both succeeded)
+        // =====================================================================
+        {
+            // Compute mean time per query per mode across runs (successful only)
+            std::map<int, double> baseline_total_per_q, pac_total_per_q;
+            std::map<int, int> baseline_count_per_q, pac_count_per_q;
+            for (const auto &r : all_results) {
+                if (!r.success) continue;
+                if (r.mode == "baseline") {
+                    baseline_total_per_q[r.query_num] += r.time_ms;
+                    baseline_count_per_q[r.query_num]++;
+                } else if (r.mode == "PAC") {
+                    pac_total_per_q[r.query_num] += r.time_ms;
+                    pac_count_per_q[r.query_num]++;
+                }
+            }
+
+            Log("--- Per-query slowdown (PAC / baseline) ---");
+            double sum_slowdown = 0;
+            int n_compared = 0;
+            double worst_slowdown = 0;
+            int worst_query = 0;
+            for (auto &kv : baseline_total_per_q) {
+                int qnum = kv.first;
+                if (pac_count_per_q.count(qnum) == 0 || baseline_count_per_q[qnum] == 0) continue;
+                double baseline_mean = kv.second / baseline_count_per_q[qnum];
+                double pac_mean = pac_total_per_q[qnum] / pac_count_per_q[qnum];
+                double slowdown = (baseline_mean > 0) ? pac_mean / baseline_mean : 0;
+                Log(string("  Q") + std::to_string(qnum) + ": " +
+                    FormatNumber(baseline_mean) + " ms -> " + FormatNumber(pac_mean) + " ms (" +
+                    FormatNumber(slowdown) + "x)");
+                sum_slowdown += slowdown;
+                n_compared++;
+                if (slowdown > worst_slowdown) {
+                    worst_slowdown = slowdown;
+                    worst_query = qnum;
+                }
+            }
+            if (n_compared > 0) {
+                double avg_slowdown = sum_slowdown / n_compared;
+                Log(string("  Average slowdown: ") + FormatNumber(avg_slowdown) + "x over " +
+                    std::to_string(n_compared) + " queries");
+                Log(string("  Worst slowdown: ") + FormatNumber(worst_slowdown) + "x (Q" +
+                    std::to_string(worst_query) + ")");
+            }
         }
 
         Log("=== Benchmark Complete ===");
