@@ -434,4 +434,53 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 #undef REG_COUNTS_FOR
 }
 
+// ============================================================================
+// pac_hash: UBIGINT -> UBIGINT with exactly 32 bits set
+// ============================================================================
+
+// 64-bit prime with exactly 32 bits set (irregular pattern), used for hashing in hash32_32
+#define PAC_HASH_PRIME 0xB2833106536E95DFULL
+
+static uint64_t hash32_32(uint64_t num) {
+	for (int round = 0; round < 8; ++round) {
+		int pop = pac_popcount64(num);
+
+		// Negate if overfull
+		if (pop > 32) {
+			num = ~num;
+			pop = 64 - pop;
+		}
+
+		uint64_t next = PAC_HASH_PRIME * (num ^ PAC_HASH_PRIME);
+
+		if (pop >= 26) {
+			for (int iter = 0; iter < 10; ++iter) {
+				if (pop == 32) return num;
+
+				uint64_t mask = 1ULL << ((next >> (6 * iter)) & 63);
+				if ((num & mask) == 0) {
+					num |= mask;
+					++pop;
+				}
+			}
+		}
+
+		num = next; // fallback to next hash if repair fails
+	}
+	return 0xAAAAAAAAAAAAAAAAULL; // 1010...10 pattern: exactly 32 bits set
+}
+
+static void PacHashFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	auto &input = args.data[0];
+	auto count = args.size();
+
+	UnaryExecutor::Execute<uint64_t, uint64_t>(input, result, count,
+	                                           [](uint64_t val) { return hash32_32(val); });
+}
+
+void RegisterPacHashFunction(ExtensionLoader &loader) {
+	ScalarFunction pac_hash("pac_hash", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacHashFunction);
+	loader.RegisterFunction(pac_hash);
+}
+
 } // namespace duckdb

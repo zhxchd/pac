@@ -239,6 +239,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register pac_mean scalar function (used by top-k pushdown for ordering)
 	RegisterPacMeanFunction(loader);
 
+	// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
+	RegisterPacHashFunction(loader);
+
 	// Register PAC parser extension
 	db.config.parser_extensions.push_back(PACParserExtension());
 

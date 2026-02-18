@@ -95,6 +95,9 @@ unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const Bo
 // Register pac_aggregate scalar function(s) with the extension loader
 void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 
+// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
+void RegisterPacHashFunction(ExtensionLoader &loader);
+
 // Declare the noisy-sample helper so other translation units (pac_count.cpp) can call it.
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
 // mi: mutual information parameter for noise calculation
