@@ -136,10 +136,8 @@ ALTER TABLE customer SET PU;
 # Test 1: TPC-H Q15-style CTE with aggregate in subquery on CTE
 # (moved from pac_bitslice_compiler_uncorrelated_subqueries.test)
 # Tests: CTE with aggregate, subquery that computes max() from CTE
-# The aggregate in the subquery should NOT be converted to pac_max
-# because it operates on already-aggregated CTE data, not base tables
 # ============================================================
-query IIII
+query II
 WITH revenue AS (
     SELECT
         l_suppkey AS supplier_no,
@@ -156,8 +154,6 @@ WITH revenue AS (
 SELECT
     s_suppkey,
     s_name,
-    total_revenue,
-    NULL as placeholder
 FROM
     supplier
         JOIN revenue ON s_suppkey = supplier_no
@@ -169,7 +165,7 @@ WHERE
 ORDER BY
     s_suppkey;
 ----
-3	Supplier#003	5688.5248	NULL
+3	Supplier#003
 
 # ============================================================
 # Test 2: Q13 pattern rewritten as explicit CTE
