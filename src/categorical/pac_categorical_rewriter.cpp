@@ -1313,7 +1313,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	// Strip scalar wrappers (Projection→first()→Projection) over PAC aggregates before recursing.
 	// This removes the first() aggregate that can't handle LIST<DOUBLE>, and lets the inner
 	// projection be processed naturally with the outer's table_index.
-	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && !inside_cte_definition) {
 		auto *unwrapped = RecognizeDuckDBScalarWrapper(op);
 		if (unwrapped && !FindPacAggregateInOperator(unwrapped).empty()) {
 			StripScalarWrapperInPlace(op_ptr, true);
@@ -1364,7 +1364,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		// Check for standard aggregates over counters (e.g., sum(LIST<DOUBLE>) → pac_sum_list)
 		// Children already converted (bottom-up), so their types are LIST<DOUBLE>
 		ReplaceAggregatesOverCounters(op, input.context, plan_root);
-	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) { // === PROJECTION: rewrite PAC expressions ===
+	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && !inside_cte_definition) { // === PROJECTION: rewrite PAC expressions ===
 		auto &proj = op->Cast<LogicalProjection>();
 		bool is_filter_pattern = IsProjectionReferencedByFilterPattern(proj, patterns, plan_root);
 		// A projection is terminal if it's the top-level output projection:
@@ -1385,7 +1385,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			RewriteProjectionExpression(input, proj, i, plan_root, is_filter_pattern, is_terminal,
 			                            saved_filter_pattern_exprs);
 		}
-	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER) { // === FILTER: rewrite expressions with pac_filter ===
+	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER && !inside_cte_definition) { // === FILTER: rewrite expressions with pac_filter ===
 		// Inline saved projection arithmetic expressions into filter expressions.
 		// This fuses the projection's list_transform into the filter's lambda for a single pass.
 		if (!saved_filter_pattern_exprs.empty()) {
@@ -1466,8 +1466,8 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				WrapHavingPacRefsWithNoised(filter.expressions[fi], pac_bindings, input);
 			}
 		}
-	} else if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-	           op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) { // === JOIN: rewrite comparison conditions ===
+	} else if ((op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	            op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) && !inside_cte_definition) { // === JOIN: rewrite comparison conditions ===
 		// Inline saved projection arithmetic into join conditions
 		if (!saved_filter_pattern_exprs.empty()) {
 			auto &join = op->Cast<LogicalComparisonJoin>();
