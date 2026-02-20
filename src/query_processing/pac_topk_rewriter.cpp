@@ -187,14 +187,11 @@ static vector<PacTopKAggInfo> FindPacAggregates(LogicalAggregate &agg) {
 			continue;
 		}
 		auto &bound_agg = expr->Cast<BoundAggregateExpression>();
-		if (IsAnyPacAggregate(bound_agg.function.name)) {
+		if (IsPacAggregate(bound_agg.function.name)) {
 			PacTopKAggInfo info;
 			info.agg_index = i;
 			info.original_name = bound_agg.function.name;
-			// For already-converted _counters aggregates the return type is LIST<FLOAT>.
-			// Use PacFloatLogicalType so NoisedProj's pac_noised output needs no cast.
-			info.original_type =
-			    IsPacCountersAggregate(bound_agg.function.name) ? PacFloatLogicalType() : expr->return_type;
+			info.original_type = expr->return_type;
 			info.agg_binding = ColumnBinding(agg.aggregate_index, i);
 			result.push_back(std::move(info));
 		}
@@ -849,14 +846,6 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// NoisedProj applies noise the output values no longer match the sort order.
 	// Re-sorting the small top-k result set by noised values is cheap.
 	// ==========================================================================
-	// Build a type map from NoisedProj's output bindings to resolved types,
-	// so we can update stale return_types in the remapped ORDER BY expressions.
-	auto noised_bindings = plan->GetColumnBindings();
-	unordered_map<uint64_t, LogicalType> noised_type_map;
-	for (idx_t i = 0; i < noised_bindings.size() && i < plan->types.size(); i++) {
-		noised_type_map[HashBinding(noised_bindings[i])] = plan->types[i];
-	}
-
 	vector<BoundOrderByNode> final_orders;
 	for (auto &saved : saved_orders) {
 		auto expr = saved.expression->Copy();
@@ -866,13 +855,6 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				auto it = order_remap.find(HashBinding(ref.binding));
 				if (it != order_remap.end()) {
 					ref.binding = it->second;
-					// Update return_type to match NoisedProj's actual output type.
-					// The saved ORDER BY expression may have a stale type from before
-					// PAC transformation (e.g. DECIMAL(38,2) when NoisedProj outputs FLOAT).
-					auto type_it = noised_type_map.find(HashBinding(ref.binding));
-					if (type_it != noised_type_map.end()) {
-						ref.return_type = type_it->second;
-					}
 				}
 			}
 			ExpressionIterator::EnumerateChildren(*e, RemapToNoised);

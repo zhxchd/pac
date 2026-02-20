@@ -11,6 +11,8 @@
 #include "utils/pac_helpers.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
+#include "duckdb/planner/operator/logical_top_n.hpp"
 
 namespace duckdb {
 
@@ -1489,6 +1491,43 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 					continue;
 				}
 				WrapHavingPacRefsWithNoised(filter.expressions[fi], pac_bindings, input);
+			}
+		}
+	} else if ((op->type == LogicalOperatorType::LOGICAL_ORDER_BY ||
+	            op->type == LogicalOperatorType::LOGICAL_TOP_N) &&
+	           !inside_cte_definition) {
+		// === ORDER_BY / TOP_N: fix stale expression types after child projections were rewritten ===
+		// When PAC aggregates are converted to _counters, intermediate (non-terminal) projection
+		// column types change from e.g. DECIMAL(38,2) to LIST<FLOAT>. ORDER_BY expressions that
+		// reference these columns still have the old return_type. Fix them here.
+		if (!op->children.empty()) {
+			auto child_bindings = op->children[0]->GetColumnBindings();
+			auto &child_types = op->children[0]->types;
+			auto fix_expr_types = [&](unique_ptr<Expression> &e) {
+				std::function<void(unique_ptr<Expression> &)> Fix = [&](unique_ptr<Expression> &e2) {
+					if (e2->type == ExpressionType::BOUND_COLUMN_REF) {
+						auto &col_ref = e2->Cast<BoundColumnRefExpression>();
+						for (idx_t ci = 0; ci < child_bindings.size() && ci < child_types.size(); ci++) {
+							if (col_ref.binding == child_bindings[ci]) {
+								col_ref.return_type = child_types[ci];
+								break;
+							}
+						}
+					}
+					ExpressionIterator::EnumerateChildren(*e2, Fix);
+				};
+				Fix(e);
+			};
+			if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+				auto &order = op->Cast<LogicalOrder>();
+				for (auto &o : order.orders) {
+					fix_expr_types(o.expression);
+				}
+			} else {
+				auto &topn = op->Cast<LogicalTopN>();
+				for (auto &o : topn.orders) {
+					fix_expr_types(o.expression);
+				}
 			}
 		}
 	} else if ((op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
