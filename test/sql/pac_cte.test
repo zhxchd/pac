@@ -293,6 +293,37 @@ SELECT COUNT(*) FROM cust_nation;
 8
 
 # ============================================================
+# Test 9-debug: Show CTE pac_sum values for debugging
+# ============================================================
+query II
+SELECT l_suppkey, SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+GROUP BY l_suppkey
+ORDER BY l_suppkey;
+----
+1	4993.8432
+2	7956.0704
+3	8559.0016
+4	3997.6960
+
+# Debug test
+query I
+WITH supplier_totals AS (
+    SELECT
+        l_suppkey,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+    FROM lineitem
+    JOIN orders ON l_orderkey = o_orderkey
+    GROUP BY l_suppkey
+)
+SELECT l_suppkey
+FROM supplier_totals
+WHERE total_revenue > 5000
+----
+2
+3
+
+# ============================================================
 # Test 9: CTE with IN subquery containing PAC aggregate (MARK_JOIN)
 # Tests: CTE computes per-supplier revenue, main query uses IN
 # subquery on CTE with a filter on the PAC aggregate. The IN
