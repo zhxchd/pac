@@ -574,8 +574,7 @@ TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &bindin
 			auto &cte_body = *cte_def->children[0];
 			auto body_bindings = cte_body.GetColumnBindings();
 			if (binding.column_index < body_bindings.size()) {
-				TraceBindingForProtectedColumns(cte_body, body_bindings[binding.column_index], root,
-				                                protected_columns);
+				TraceBindingForProtectedColumns(cte_body, body_bindings[binding.column_index], root, protected_columns);
 			}
 		}
 	}

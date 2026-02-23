@@ -1959,7 +1959,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, relevant_tables, check, pu_table_names, cte_map);
 
 	if (target_aggregates.empty()) {
-		PAC_DEBUG_PRINT("WARNING: PAC Compiler: no aggregate nodes with privacy unit tables found in plan - skipping PAC compilation");
+		PAC_DEBUG_PRINT("WARNING: PAC Compiler: no aggregate nodes with privacy unit tables found in plan - skipping "
+		                "PAC compilation");
 		return;
 	}
 

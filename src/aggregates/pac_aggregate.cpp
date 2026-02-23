@@ -24,7 +24,8 @@ namespace duckdb {
 // Global PacPState map for cross-aggregate p-tracking within a query
 // ============================================================================
 static std::mutex g_pstate_map_mutex; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-static std::unordered_map<uint64_t, std::weak_ptr<PacPState>> g_pstate_map; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static std::unordered_map<uint64_t, std::weak_ptr<PacPState>>
+    g_pstate_map; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 std::shared_ptr<PacPState> GetOrCreatePState(uint64_t query_hash) {
 	std::lock_guard<std::mutex> lock(g_pstate_map_mutex);
