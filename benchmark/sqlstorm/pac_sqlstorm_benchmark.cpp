@@ -494,7 +494,7 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
                                             const string &db_path, double timeout_s,
                                             PassStats &stats, bool check_pac = false) {
 	int total = static_cast<int>(query_files.size());
-	int log_interval = std::max(1, total / 20);
+	int log_interval = std::max(1, total / 10);
 	vector<BenchmarkQueryResult> results;
 
 	auto reconnect = [&]() {
