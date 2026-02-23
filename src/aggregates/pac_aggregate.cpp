@@ -23,8 +23,8 @@ namespace duckdb {
 // ============================================================================
 // Global PacPState map for cross-aggregate p-tracking within a query
 // ============================================================================
-static std::mutex g_pstate_map_mutex;
-static std::unordered_map<uint64_t, std::weak_ptr<PacPState>> g_pstate_map;
+static std::mutex g_pstate_map_mutex; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static std::unordered_map<uint64_t, std::weak_ptr<PacPState>> g_pstate_map; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 std::shared_ptr<PacPState> GetOrCreatePState(uint64_t query_hash) {
 	std::lock_guard<std::mutex> lock(g_pstate_map_mutex);
@@ -171,7 +171,7 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 // Returns: correction*yJ + noise where yJ is a randomly selected counter
 PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
                                        bool use_deterministic_noise, uint64_t is_null, uint64_t counter_selector,
-                                       std::shared_ptr<PacPState> pstate) {
+                                       const std::shared_ptr<PacPState> &pstate) {
 	D_ASSERT(~is_null != 0); // at least one bit must be valid
 
 	// The vals array will always have 64 elements. If a counter is NULL, we push 0.

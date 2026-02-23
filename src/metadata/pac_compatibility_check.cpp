@@ -13,6 +13,7 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <algorithm>
@@ -287,6 +288,23 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op, const P
 	return found_pac_aggregate;
 }
 
+// Helper: Find a LogicalMaterializedCTE by its table_index (cte_index in CTE_REF nodes)
+static LogicalMaterializedCTE *FindMaterializedCTE(LogicalOperator &op, idx_t cte_table_index) {
+	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op.Cast<LogicalMaterializedCTE>();
+		if (cte.table_index == cte_table_index) {
+			return &cte;
+		}
+	}
+	for (auto &child : op.children) {
+		auto *result = FindMaterializedCTE(*child, cte_table_index);
+		if (result) {
+			return result;
+		}
+	}
+	return nullptr;
+}
+
 // Helper: Find the operator in the plan that produces a given table_index
 static LogicalOperator *FindOperatorByTableIndex(LogicalOperator &op, idx_t table_index) {
 	// Check if this operator produces the table_index
@@ -303,6 +321,11 @@ static LogicalOperator *FindOperatorByTableIndex(LogicalOperator &op, idx_t tabl
 	} else if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = op.Cast<LogicalProjection>();
 		if (proj.table_index == table_index) {
+			return &op;
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &cte_ref = op.Cast<LogicalCTERef>();
+		if (cte_ref.table_index == table_index) {
 			return &op;
 		}
 	}
@@ -368,6 +391,16 @@ static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &bind
 					TraceBindingToPUTable(*source_op, col_ref.binding, pu_tables, root);
 				}
 			});
+		}
+	} else if (source_op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &cte_ref = source_op->Cast<LogicalCTERef>();
+		auto *cte_def = FindMaterializedCTE(root, cte_ref.cte_index);
+		if (cte_def && !cte_def->children.empty() && cte_def->children[0]) {
+			auto &cte_body = *cte_def->children[0];
+			auto body_bindings = cte_body.GetColumnBindings();
+			if (binding.column_index < body_bindings.size()) {
+				TraceBindingToPUTable(cte_body, body_bindings[binding.column_index], pu_tables, root);
+			}
 		}
 	}
 }
@@ -477,10 +510,13 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY ||
 	           current_op.type == LogicalOperatorType::LOGICAL_TOP_N ||
 	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT) {
-		// For ORDER BY, TOP N, and LIMIT: check the child operator's output
-		// These operators just reorder/filter rows, they don't change the columns
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotFromPU(*child, plan_root, pu_tables, tables_with_protected_cols);
+		}
+	} else if (current_op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		// Only check children[1] (the consumer). children[0] is the CTE definition (intermediate).
+		if (current_op.children.size() > 1 && current_op.children[1]) {
+			CheckOutputColumnsNotFromPU(*current_op.children[1], plan_root, pu_tables, tables_with_protected_cols);
 		}
 	}
 }
@@ -530,6 +566,17 @@ TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &bindin
 					TraceBindingForProtectedColumns(*source_op, col_ref.binding, root, protected_columns);
 				}
 			});
+		}
+	} else if (source_op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &cte_ref = source_op->Cast<LogicalCTERef>();
+		auto *cte_def = FindMaterializedCTE(root, cte_ref.cte_index);
+		if (cte_def && !cte_def->children.empty() && cte_def->children[0]) {
+			auto &cte_body = *cte_def->children[0];
+			auto body_bindings = cte_body.GetColumnBindings();
+			if (binding.column_index < body_bindings.size()) {
+				TraceBindingForProtectedColumns(cte_body, body_bindings[binding.column_index], root,
+				                                protected_columns);
+			}
 		}
 	}
 }
@@ -588,6 +635,11 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT) {
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotProtected(*child, plan_root, protected_columns);
+		}
+	} else if (current_op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		// Only check children[1] (the consumer). children[0] is the CTE definition (intermediate).
+		if (current_op.children.size() > 1 && current_op.children[1]) {
+			CheckOutputColumnsNotProtected(*current_op.children[1], plan_root, protected_columns);
 		}
 	}
 }
