@@ -352,10 +352,10 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
     std::cout << "[" << Timestamp() << "] Connection ready with PAC extension loaded" << std::endl;
 
     // Find query directories
-    string pac_queries_dir = FindQueriesDirectory("tpch_pac_queries");
+    string pac_queries_dir = FindQueriesDirectory("tpch/tpch_pac_queries");
 
     if (pac_queries_dir.empty()) {
-        std::cerr << "ERROR: Cannot find tpch_pac_queries directory" << std::endl;
+        std::cerr << "ERROR: Cannot find tpch/tpch_pac_queries directory" << std::endl;
         return;
     }
 

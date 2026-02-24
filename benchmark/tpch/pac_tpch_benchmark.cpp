@@ -402,9 +402,9 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
         csv << "query,mode,median_ms\n";
 
     	// Locate PAC query directories
-    	string bitslice_dir = queries_dir + string("/tpch_pac_queries");
-    	string naive_dir = queries_dir + string("/tpch_pac_naive_queries");
-    	string simple_hash_dir = queries_dir + string("/tpch_pac_simple_hash_queries");
+    	string bitslice_dir = queries_dir + string("/tpch/tpch_pac_queries");
+    	string naive_dir = queries_dir + string("/tpch/tpch_pac_naive_queries");
+    	string simple_hash_dir = queries_dir + string("/tpch/tpch_pac_simple_hash_queries");
 
     	// Discover all .sql files in the bitslice directory
     	auto query_entries = DiscoverQueryFiles(bitslice_dir);
@@ -559,7 +559,7 @@ static void PrintUsageMain() {
                << "  sf: TPCH scale factor (int, default 10)\n"
                << "  db_path: DuckDB database file (default 'tpch.db')\n"
                << "  queries_dir: root directory containing PAC SQL variants (default 'benchmark').\n"
-               << "               subdirectories expected: 'tpch_pac_queries' (bitslice), 'tpch_pac_naive_queries' (naive), 'tpch_pac_simple_hash_queries' (simple hash)\n"
+               << "               subdirectories expected: 'tpch/tpch_pac_queries' (bitslice), 'tpch/tpch_pac_naive_queries' (naive), 'tpch/tpch_pac_simple_hash_queries' (simple hash)\n"
                << "  out_csv: optional output CSV path (auto-named if omitted)\n"
                << "  --run-naive: optional flag to instruct the benchmark to run a naive PAC variant as well\n"
                << "  --run-simple-hash: optional flag to instruct the benchmark to run a simple hash PAC variant as well\n"

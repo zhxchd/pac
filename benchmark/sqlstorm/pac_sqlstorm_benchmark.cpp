@@ -22,6 +22,8 @@
 #include <iomanip>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <dirent.h>
@@ -389,47 +391,111 @@ static void LoadPACSchema(Connection &con, const string &pac_schema_filename) {
 	Log("PAC schema loaded successfully");
 }
 
-// Run a single query with timeout via watchdog thread.
-static BenchmarkQueryResult RunQuery(Connection &con, const string &name, const string &sql, double timeout_s) {
+// Persistent worker thread for query execution — avoids creating a new thread per query.
+// Main thread submits work and monitors for timeouts; worker thread runs con.Query().
+struct QueryWorker {
+	std::thread thread;
+	std::mutex mtx;
+	std::condition_variable cv_work;
+	std::condition_variable cv_done;
+
+	Connection *con = nullptr;
+	const string *sql = nullptr;
+	unique_ptr<MaterializedQueryResult> result;
+	std::exception_ptr exception;
+	bool has_work = false;
+	bool work_done = false;
+	bool stop = false;
+
+	QueryWorker() {
+		thread = std::thread([this]() { WorkerLoop(); });
+	}
+
+	~QueryWorker() {
+		{
+			std::lock_guard<std::mutex> lk(mtx);
+			stop = true;
+		}
+		cv_work.notify_one();
+		if (thread.joinable()) {
+			thread.join();
+		}
+	}
+
+	void WorkerLoop() {
+		while (true) {
+			std::unique_lock<std::mutex> lk(mtx);
+			cv_work.wait(lk, [this]() { return has_work || stop; });
+			if (stop && !has_work) {
+				return;
+			}
+
+			Connection *local_con = con;
+			const string &local_sql = *sql;
+			lk.unlock();
+
+			unique_ptr<MaterializedQueryResult> local_result;
+			std::exception_ptr local_exception;
+			try {
+				local_result = local_con->Query(local_sql);
+			} catch (...) {
+				local_exception = std::current_exception();
+			}
+
+			lk.lock();
+			result = std::move(local_result);
+			exception = local_exception;
+			work_done = true;
+			has_work = false;
+			lk.unlock();
+			cv_done.notify_one();
+		}
+	}
+
+	// Submit a query; blocks until the query completes or timeout triggers an interrupt.
+	void Submit(Connection &c, const string &q, double timeout_s) {
+		{
+			std::lock_guard<std::mutex> lk(mtx);
+			con = &c;
+			sql = &q;
+			result.reset();
+			exception = nullptr;
+			has_work = true;
+			work_done = false;
+		}
+		cv_work.notify_one();
+
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s);
+		std::unique_lock<std::mutex> lk(mtx);
+		if (!cv_done.wait_until(lk, deadline, [this]() { return work_done; })) {
+			// Timed out — interrupt and wait for worker to finish
+			lk.unlock();
+			c.Interrupt();
+			lk.lock();
+			cv_done.wait(lk, [this]() { return work_done; });
+		}
+	}
+};
+
+// Run a single query with timeout via persistent worker thread.
+static BenchmarkQueryResult RunQuery(QueryWorker &worker, Connection &con, const string &name, const string &sql, double timeout_s) {
 	BenchmarkQueryResult qr;
 	qr.name = name;
 	qr.rows = 0;
 	qr.pac_applied = false;
 
 	try {
-		unique_ptr<MaterializedQueryResult> result;
-		std::atomic<bool> query_done {false};
-		std::exception_ptr query_exception;
-
 		auto start = std::chrono::steady_clock::now();
-		std::thread query_thread([&]() {
-			try {
-				result = con.Query(sql);
-			} catch (...) {
-				query_exception = std::current_exception();
-			}
-			query_done.store(true, std::memory_order_release);
-		});
-
-		auto deadline = start + std::chrono::duration<double>(timeout_s);
-		while (!query_done.load(std::memory_order_acquire)) {
-			if (std::chrono::steady_clock::now() >= deadline) {
-				con.Interrupt();
-				break;
-			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		}
-		query_thread.join();
+		worker.Submit(con, sql, timeout_s);
 		auto end = std::chrono::steady_clock::now();
 		qr.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
 
-		if (query_exception) {
-			std::rethrow_exception(query_exception);
+		if (worker.exception) {
+			std::rethrow_exception(worker.exception);
 		}
 
-		if (result && result->HasError()) {
-			qr.error = result->GetError();
-			// Strip stack traces for cleaner grouping
+		if (worker.result && worker.result->HasError()) {
+			qr.error = worker.result->GetError();
 			auto stack_pos = qr.error.find("\n\nStack Trace");
 			if (stack_pos != string::npos) {
 				qr.error = qr.error.substr(0, stack_pos);
@@ -450,14 +516,9 @@ static BenchmarkQueryResult RunQuery(Connection &con, const string &name, const 
 			qr.state = "timeout";
 		} else {
 			qr.state = "success";
-			if (result) {
-				int64_t row_count = 0;
-				while (auto chunk = result->Fetch()) {
-					row_count += chunk->size();
-				}
-				qr.rows = row_count;
-			}
 		}
+		// Free result memory immediately (match OLAPBench fetch_result=false)
+		worker.result.reset();
 	} catch (std::exception &e) {
 		string err = e.what();
 		auto stack_pos = err.find("\n\nStack Trace");
@@ -468,8 +529,6 @@ static BenchmarkQueryResult RunQuery(Connection &con, const string &name, const 
 			err = err.substr(0, 200);
 		}
 		qr.error = err;
-		// Classify the exception the same way as result errors:
-		// only FATAL / database invalidation are true crashes
 		if (err.find("FATAL") != string::npos ||
 		    err.find("database has been invalidated") != string::npos) {
 			qr.state = "crash";
@@ -479,10 +538,12 @@ static BenchmarkQueryResult RunQuery(Connection &con, const string &name, const 
 		} else {
 			qr.state = "error";
 		}
+		worker.result.reset();
 	} catch (...) {
 		qr.state = "crash";
 		qr.time_ms = 0;
 		qr.error = "unexpected crash (non-std::exception)";
+		worker.result.reset();
 	}
 
 	return qr;
@@ -496,14 +557,17 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 	int total = static_cast<int>(query_files.size());
 	int log_interval = std::max(1, total / 10);
 	vector<BenchmarkQueryResult> results;
+	QueryWorker worker;
 
 	auto reconnect = [&]() {
 		con.reset();
 		db.reset();
 		db = make_uniq<DuckDB>(db_path.c_str());
 		con = make_uniq<Connection>(*db);
-		con->Query("INSTALL icu; LOAD icu;");
-		con->Query("INSTALL tpch; LOAD tpch;");
+		con->Query("INSTALL icu");
+		con->Query("LOAD icu");
+		con->Query("INSTALL tpch");
+		con->Query("LOAD tpch");
 		auto r = con->Query("LOAD pac");
 		if (r->HasError()) {
 			throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
@@ -522,7 +586,7 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 			continue;
 		}
 
-		auto qr = RunQuery(*con, name, sql, timeout_s);
+		auto qr = RunQuery(worker, *con, name, sql, timeout_s);
 
 		if (qr.state == "success") {
 			stats.success++;
@@ -567,7 +631,7 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 				Log("  reconnecting...");
 				reconnect();
 				// Retry this query on the fresh connection
-				qr = RunQuery(*con, name, sql, timeout_s);
+				qr = RunQuery(worker, *con, name, sql, timeout_s);
 				// Classify the retried result normally
 				if (qr.state == "success") {
 					stats.success++;
@@ -619,6 +683,11 @@ static vector<BenchmarkQueryResult> RunPass(const string &label, vector<string> 
 				progress += " pac=" + std::to_string(stats.pac_applied);
 			}
 			Log(progress);
+		}
+
+		// Periodically checkpoint to reclaim DuckDB memory
+		if ((i + 1) % 1000 == 0) {
+			try { con->Query("CHECKPOINT"); } catch (...) {}
 		}
 	}
 
@@ -804,8 +873,20 @@ static void WriteCSV(const string &csv_path, const vector<BenchmarkQueryResult> 
 
 static string FormatSF(double sf) {
 	std::ostringstream oss;
-	oss << std::fixed << std::setprecision(2) << sf;
-	return oss.str();
+	// Use enough precision to distinguish small scale factors like 0.0001
+	oss << std::fixed << std::setprecision(4) << sf;
+	// Strip trailing zeros (but keep at least one decimal)
+	string s = oss.str();
+	auto dot = s.find('.');
+	if (dot != string::npos) {
+		auto last_nonzero = s.find_last_not_of('0');
+		if (last_nonzero != string::npos && last_nonzero > dot) {
+			s = s.substr(0, last_nonzero + 1);
+		} else {
+			s = s.substr(0, dot + 2); // keep e.g. "1.0"
+		}
+	}
+	return s;
 }
 
 int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, double timeout_s,
@@ -855,8 +936,16 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				db.reset();
 				db = make_uniq<DuckDB>(db_path.c_str());
 				con = make_uniq<Connection>(*db);
-				con->Query("INSTALL icu; LOAD icu;");
-				con->Query("INSTALL tpch; LOAD tpch;");
+				con->Query("INSTALL icu");
+				con->Query("LOAD icu");
+				auto ri = con->Query("INSTALL tpch");
+				if (ri->HasError()) {
+					Log("INSTALL tpch error: " + ri->GetError());
+				}
+				auto rl = con->Query("LOAD tpch");
+				if (rl->HasError()) {
+					Log("LOAD tpch error: " + rl->GetError());
+				}
 				auto r = con->Query("LOAD pac");
 				if (r->HasError()) {
 					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
