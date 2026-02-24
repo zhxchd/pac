@@ -443,12 +443,25 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		}
 		CheckPacSampleDiversity(key_hash, buf, update_count, DIVIDE_BY_COUNT ? "pac_avg" : "pac_sum",
 		                        input.bind_data->Cast<PacBindData>());
+#if PAC_DEBUG
+		Printer::Print("pac_sum finalize: key_hash=" + std::to_string(key_hash) +
+		               " update_count=" + std::to_string(update_count) +
+		               " buf[0]=" + std::to_string(buf[0]) +
+		               " buf[1]=" + std::to_string(buf[1]) +
+		               " buf[2]=" + std::to_string(buf[2]) +
+		               " buf[3]=" + std::to_string(buf[3]) +
+		               " mi=" + std::to_string(mi) +
+		               " query_hash=" + std::to_string(query_hash));
+#endif
 		PAC_FLOAT result_val =
 		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, query_hash, pstate);
 		// Both pac_sum and pac_avg need 2x compensation:
 		// - pac_sum: doubles the sum to compensate for ~50% of values contributing to each counter
 		// - pac_avg: compensates for dividing by total_count instead of per-counter count
 		result_val *= PAC_FLOAT(2.0);
+#if PAC_DEBUG
+		Printer::Print("pac_sum finalize: result_val=" + std::to_string(result_val));
+#endif
 		data[offset + i] = FromDouble<ACC_TYPE>(result_val);
 	}
 }
