@@ -1875,7 +1875,16 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 			for (auto &fk_kv : check.fk_paths) {
 				sorted_fk_cte_keys.push_back(fk_kv.first);
 			}
-			std::sort(sorted_fk_cte_keys.begin(), sorted_fk_cte_keys.end());
+			std::sort(sorted_fk_cte_keys.begin(), sorted_fk_cte_keys.end(), [&check](const string &a, const string &b) {
+				auto a_it = check.fk_paths.find(a);
+				auto b_it = check.fk_paths.find(b);
+				size_t a_len = (a_it != check.fk_paths.end()) ? a_it->second.size() : 0;
+				size_t b_len = (b_it != check.fk_paths.end()) ? b_it->second.size() : 0;
+				if (a_len != b_len) {
+					return a_len < b_len;
+				}
+				return a < b;
+			});
 
 			for (auto &fk_table : sorted_fk_cte_keys) {
 				auto &fk_path = check.fk_paths.at(fk_table);
@@ -2085,12 +2094,23 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			} else {
 				// FK-linked table case: find FK columns that reference the PU
 				// Check which FK-linked tables are in this aggregate's subtree
-				// Sort FK path keys for deterministic behavior across platforms
+				// Sort FK path keys by path length (shortest first) so we prefer
+				// the most direct FK reference to the PU (e.g., orders->customer
+				// before lineitem->orders->customer). Break ties alphabetically.
 				vector<string> sorted_fk_keys;
 				for (auto &kv : check.fk_paths) {
 					sorted_fk_keys.push_back(kv.first);
 				}
-				std::sort(sorted_fk_keys.begin(), sorted_fk_keys.end());
+				std::sort(sorted_fk_keys.begin(), sorted_fk_keys.end(), [&check](const string &a, const string &b) {
+					auto a_it = check.fk_paths.find(a);
+					auto b_it = check.fk_paths.find(b);
+					size_t a_len = (a_it != check.fk_paths.end()) ? a_it->second.size() : 0;
+					size_t b_len = (b_it != check.fk_paths.end()) ? b_it->second.size() : 0;
+					if (a_len != b_len) {
+						return a_len < b_len;
+					}
+					return a < b;
+				});
 
 				for (auto &fk_table : sorted_fk_keys) {
 					auto &path = check.fk_paths.at(fk_table);

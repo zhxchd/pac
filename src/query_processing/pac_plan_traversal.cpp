@@ -333,8 +333,9 @@ CTETableMap BuildAndResolveCTETableMap(LogicalOperator *plan_root) {
 		for (auto &kv : cte_map) {
 			string tables_str;
 			for (auto &t : kv.second) {
-				if (!tables_str.empty())
+				if (!tables_str.empty()) {
 					tables_str += ", ";
+				}
 				tables_str += t;
 			}
 			PAC_DEBUG_PRINT("  CTE index " + std::to_string(kv.first) + ": {" + tables_str + "}");
