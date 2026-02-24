@@ -113,8 +113,10 @@ static string FindSchemaFile(const string &filename) {
     vector<string> candidates = {
         filename,
         "./" + filename,
-        "../" + filename,
-        "../../" + filename,
+        "./tpch/" + filename,
+        "benchmark/tpch/" + filename,
+        "../benchmark/tpch/" + filename,
+        "../../benchmark/tpch/" + filename,
         "benchmark/" + filename,
         "../benchmark/" + filename,
         "../../benchmark/" + filename
@@ -138,7 +140,11 @@ static string FindSchemaFile(const string &filename) {
         }
 
         for (int i = 0; i < 6; ++i) {
-            string cand = dir + "/benchmark/" + filename;
+            string cand = dir + "/benchmark/tpch/" + filename;
+            if (FileExists(cand)) {
+                return cand;
+            }
+            cand = dir + "/benchmark/" + filename;
             if (FileExists(cand)) {
                 return cand;
             }
