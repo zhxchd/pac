@@ -758,8 +758,8 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 
 // Unified FinalizeCounters template for pac_sum_counters and pac_avg_counters
 // DIVIDE_BY_COUNT=false for pac_sum_counters, true for pac_avg_counters
-// Returns LIST<DOUBLE> with exactly 64 elements.
-// Position j is NULL if key_hash bit j is 0, otherwise value * 2 (to compensate for 50% sampling).
+// Returns LIST<DOUBLE> with exactly 64 elements (no NULLs).
+// Position j is 0 if key_hash bit j is 0, otherwise value * 2 (to compensate for 50% sampling).
 template <class State, bool SIGNED, bool DIVIDE_BY_COUNT>
 void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<State *>(states);
@@ -774,14 +774,11 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
 
 	// scale_divisor for DECIMAL support (used by pac_avg)
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
 	// correction factor for value scaling
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
-
-	auto &result_validity = FlatVector::Validity(result);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -798,11 +795,8 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 		uint64_t update_count = 0;
 
 		// If no values were processed, key_hash stays 0, buf stays all zeros
-		// All 64 positions will be marked as NULL (key_hash bit = 0)
-		// Also set the result row itself to NULL for DEFAULT_NULL_HANDLING
-		if (!s) {
-			result_validity.SetInvalid(offset + i);
-		} else {
+		// All 64 positions will be 0
+		if (s) {
 			key_hash = s->key_hash;
 			update_count = s->update_count;
 #ifndef PAC_SIGNEDSUM
@@ -828,7 +822,7 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 		CheckPacSampleDiversity(key_hash, buf, update_count, DIVIDE_BY_COUNT ? "pac_avg" : "pac_sum",
 		                        input.bind_data->Cast<PacBindData>());
 
-		// Copy counters to list: NULL where key_hash bit is 0, value (scaled) otherwise
+		// Copy counters to list: 0 where key_hash bit is 0, value (scaled) otherwise
 		// Both pac_sum_counters and pac_avg_counters need 2x compensation:
 		// - pac_sum_counters: doubles sum to compensate for ~50% of values in each counter
 		// - pac_avg_counters: compensates for dividing by total_count instead of per-counter count
@@ -837,7 +831,7 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 			if ((key_hash >> j) & 1ULL) {
 				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * 2.0 * correction);
 			} else {
-				child_validity.SetInvalid(base + j); // NULL for positions not sampled
+				child_data[base + j] = 0.0; // 0 for positions not sampled
 			}
 		}
 	}

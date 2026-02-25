@@ -241,6 +241,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register pac_mean scalar function (used by top-k pushdown for ordering)
 	RegisterPacMeanFunction(loader);
 
+	// Register pac_keyhash aggregate function (UBIGINT -> UBIGINT, bitwise OR of key_hashes)
+	RegisterPacKeyHashFunction(loader);
+
 	// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);
 

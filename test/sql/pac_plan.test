@@ -515,6 +515,50 @@ ORDER BY s_suppkey;
 ----
 logical_opt	<REGEX>:.*pac_sum.*
 
+# Test 20: Top-K pushdown includes pac_keyhash aggregate (PATH B — no intermediate projections)
+# When pac_noised is called in the NoisedProj, it should receive the actual keyhash
+# from pac_keyhash rather than a hardcoded constant. Verify pac_keyhash appears in the plan.
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    SUM(l_extendedprice) AS total_price
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey
+ORDER BY
+    total_price DESC
+LIMIT 3;
+----
+logical_opt	<REGEX>:.*pac_keyhash.*
+
+# Test 21: Top-K pushdown includes pac_keyhash with VARCHAR GROUP BY (PATH A — with intermediate projections)
+# VARCHAR GROUP BY causes DuckDB to insert __internal_decompress_string projections.
+# pac_keyhash must be passed through these intermediate projections to reach pac_noised.
+query II
+EXPLAIN SELECT
+    n_name,
+    COUNT(*) AS order_count
+FROM
+    orders,
+    customer,
+    nation
+WHERE
+    o_custkey = c_custkey
+    AND c_nationkey = n_nationkey
+GROUP BY
+    n_name
+ORDER BY
+    order_count DESC
+LIMIT 2;
+----
+logical_opt	<REGEX>:.*pac_keyhash.*
+
 statement ok
 SET explain_output='physical_only';
 

@@ -175,8 +175,8 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 // it returns all 64 counters so the outer query can evaluate the comparison
 // against all subsamples and produce a mask.
 
-// Returns LIST<DOUBLE> with exactly 64 elements.
-// Position j is NULL if key_hash bit j is 0, otherwise value * correction.
+// Returns LIST<DOUBLE> with exactly 64 elements (no NULLs).
+// Position j is 0 if key_hash bit j is 0, otherwise value * 2 * correction.
 void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
@@ -191,8 +191,6 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
-	auto &result_validity = FlatVector::Validity(result);
 	PAC_FLOAT buf[64];
 
 	for (idx_t i = 0; i < count; i++) {
@@ -206,12 +204,9 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 		list_entries[offset + i].length = 64;
 
 		if (!s) {
-			result_validity.SetInvalid(offset + i); // return NULL (no values seen)
-			// Still need to mark child elements as invalid for proper list structure
+			// No values seen: output 64 zeros
 			idx_t base = i * 64;
-			for (int j = 0; j < 64; j++) {
-				child_validity.SetInvalid(base + j);
-			}
+			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
 			continue;
 		}
 
@@ -220,7 +215,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 		s->GetTotals(buf);
 		CheckPacSampleDiversity(key_hash, buf, s->update_count, "pac_count", input.bind_data->Cast<PacBindData>());
 
-		// Copy counters to list: NULL where key_hash bit is 0, value * 2 * correction otherwise
+		// Copy counters to list: 0 where key_hash bit is 0, value * 2 * correction otherwise
 		// The 2x factor compensates for 50% sampling, correction is user-specified multiplier
 		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
@@ -228,7 +223,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 				child_data[base + j] =
 				    static_cast<PAC_FLOAT>(buf[j] * 2.0 * correction); // 2x for 50% sampling, then correction
 			} else {
-				child_validity.SetInvalid(base + j); // NULL for positions not sampled
+				child_data[base + j] = 0.0; // 0 for positions not sampled
 			}
 		}
 	}

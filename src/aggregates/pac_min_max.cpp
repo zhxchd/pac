@@ -203,8 +203,6 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
-	auto &result_validity = FlatVector::Validity(result);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -218,11 +216,8 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 		list_entries[offset + i].length = 64;
 
 		if (!s || !s->initialized) {
-			result_validity.SetInvalid(offset + i); // return NULL (no values seen)
-			// Still need to mark child elements as invalid for proper list structure
-			for (idx_t j = 0; j < 64; j++) {
-				child_validity.SetInvalid(i * 64 + j);
-			}
+			// No values seen: output 64 zeros
+			memset(child_data + i * 64, 0, 64 * sizeof(PAC_FLOAT));
 			continue;
 		}
 
@@ -239,10 +234,10 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 				// Counter was updated - return the value (no scaling for min/max)
 				dst[j] = ToDouble(s->extremes[swar_pos]);
 			} else {
-				// Counter was never updated - return NULL
+				// Counter was never updated - return 0
 				D_ASSERT(s->extremes[swar_pos] ==
 				         (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
-				child_validity.SetInvalid(child_idx);
+				dst[j] = 0.0;
 			}
 		}
 		CheckPacSampleDiversity(key_hash, dst, s->update_count, IS_MAX ? "pac_max" : "pac_min",

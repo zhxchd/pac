@@ -19,6 +19,7 @@
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
@@ -409,6 +410,22 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 
 	// ==========================================================================
+	// Step 0: Capture the hash child binding from a PAC aggregate.
+	//         Must happen before Step 1 converts aggregates to _counters.
+	// ==========================================================================
+	ColumnBinding hash_child_binding;
+	bool found_hash = false;
+	for (auto &info : pac_aggs) {
+		auto &expr = agg.expressions[info.agg_index];
+		auto &bound_agg = expr->Cast<BoundAggregateExpression>();
+		if (!bound_agg.children.empty() && bound_agg.children[0]->type == ExpressionType::BOUND_COLUMN_REF) {
+			hash_child_binding = bound_agg.children[0]->Cast<BoundColumnRefExpression>().binding;
+			found_hash = true;
+			break;
+		}
+	}
+
+	// ==========================================================================
 	// Step 1: Convert pac_* aggregates to pac_*_counters
 	// ==========================================================================
 #if PAC_DEBUG
@@ -447,6 +464,41 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	}
 
 	// ==========================================================================
+	// Step 1b: Add pac_keyhash aggregate (if not already present from
+	//          the categorical rewriter). Must happen BEFORE computing
+	//          agg_bindings so keyhash is included in passthrough.
+	// ==========================================================================
+	ColumnBinding keyhash_agg_binding;
+	bool has_keyhash = false;
+
+	// Check if pac_keyhash already exists
+	for (idx_t i = 0; i < agg.expressions.size(); i++) {
+		if (agg.expressions[i]->type == ExpressionType::BOUND_AGGREGATE) {
+			auto &ba = agg.expressions[i]->Cast<BoundAggregateExpression>();
+			if (ba.function.name == "pac_keyhash") {
+				keyhash_agg_binding = ColumnBinding(agg.aggregate_index, agg.groups.size() + i);
+				has_keyhash = true;
+				break;
+			}
+		}
+	}
+
+	// If not found, add it
+	if (!has_keyhash && found_hash) {
+		vector<unique_ptr<Expression>> keyhash_children;
+		keyhash_children.push_back(
+		    make_uniq<BoundColumnRefExpression>("pac_hash", LogicalType::UBIGINT, hash_child_binding));
+		auto keyhash_aggr = RebindAggregate(input.context, "pac_keyhash", std::move(keyhash_children), false);
+		if (keyhash_aggr) {
+			idx_t keyhash_idx = agg.expressions.size();
+			agg.expressions.push_back(std::move(keyhash_aggr));
+			agg.types.push_back(LogicalType::UBIGINT);
+			keyhash_agg_binding = ColumnBinding(agg.aggregate_index, agg.groups.size() + keyhash_idx);
+			has_keyhash = true;
+		}
+	}
+
+	// ==========================================================================
 	// Step 2: Build the "mean projection" between Aggregate and TopN.
 	//         This projection passes through all existing columns and adds
 	//         pac_mean(counters) columns for ordering.
@@ -477,6 +529,19 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		auto mean_expr = input.optimizer.BindScalarFunction("pac_mean", std::move(counters_ref));
 		mean_proj_exprs.push_back(std::move(mean_expr));
 		pac_mean_column_map[HashBinding(info.agg_binding)] = mean_col_idx;
+	}
+
+	// Track keyhash column index in agg_bindings and mean projection passthrough
+	idx_t keyhash_mean_proj_idx = DConstants::INVALID_INDEX;
+	idx_t keyhash_agg_bindings_idx = DConstants::INVALID_INDEX;
+	if (has_keyhash) {
+		for (idx_t i = 0; i < agg_bindings.size(); i++) {
+			if (agg_bindings[i] == keyhash_agg_binding) {
+				keyhash_mean_proj_idx = i;
+				keyhash_agg_bindings_idx = i;
+				break;
+			}
+		}
 	}
 
 	auto mean_proj = make_uniq<LogicalProjection>(mean_proj_idx, std::move(mean_proj_exprs));
@@ -603,6 +668,25 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 			}
 		}
 
+		// Add keyhash passthrough column to each intermediate projection (bottom-up)
+		vector<idx_t> keyhash_proj_indices(ctx.intermediate_projections.size(), DConstants::INVALID_INDEX);
+		if (has_keyhash && keyhash_mean_proj_idx != DConstants::INVALID_INDEX) {
+			for (int pi = static_cast<int>(ctx.intermediate_projections.size()) - 1; pi >= 0; pi--) {
+				auto *proj = ctx.intermediate_projections[pi];
+				keyhash_proj_indices[pi] = proj->expressions.size();
+				if (pi == static_cast<int>(ctx.intermediate_projections.size()) - 1) {
+					// Innermost: reference MeanProj's keyhash column
+					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
+					    LogicalType::UBIGINT, ColumnBinding(mean_proj_idx, keyhash_mean_proj_idx)));
+				} else {
+					// Reference the projection below
+					auto *below = ctx.intermediate_projections[pi + 1];
+					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
+					    LogicalType::UBIGINT, ColumnBinding(below->table_index, keyhash_proj_indices[pi + 1])));
+				}
+			}
+		}
+
 		// Resolve types bottom-up. After Step 1 changed PAC aggregates to _counters
 		// (BIGINT -> LIST<FLOAT>), ColRef return_types in outer projections are stale.
 		// Fix them by matching against the child operator's resolved column types.
@@ -639,7 +723,24 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 #if PAC_DEBUG
 		PAC_DEBUG_PRINT("PACTopKRule: Step A3b - Wrapping LIST refs in compound expressions");
 #endif
-		for (auto *proj : ctx.intermediate_projections) {
+		for (idx_t pi = 0; pi < ctx.intermediate_projections.size(); pi++) {
+			auto *proj = ctx.intermediate_projections[pi];
+			// Compute keyhash binding accessible from this projection's expressions
+			// (references the projection's child operator)
+			auto MakeKeyhashRef = [&]() -> unique_ptr<Expression> {
+				if (!has_keyhash || keyhash_mean_proj_idx == DConstants::INVALID_INDEX) {
+					return make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
+				}
+				if (pi == ctx.intermediate_projections.size() - 1) {
+					// Innermost: reference MeanProj's keyhash column
+					return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT,
+					                                           ColumnBinding(mean_proj_idx, keyhash_mean_proj_idx));
+				}
+				// Reference the projection below's keyhash passthrough column
+				auto *below = ctx.intermediate_projections[pi + 1];
+				return make_uniq<BoundColumnRefExpression>(
+				    LogicalType::UBIGINT, ColumnBinding(below->table_index, keyhash_proj_indices[pi + 1]));
+			};
 			for (idx_t i = 0; i < proj->expressions.size(); i++) {
 				auto &expr = proj->expressions[i];
 #if PAC_DEBUG
@@ -655,7 +756,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 #if PAC_DEBUG
 						PAC_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
 #endif
-						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e));
+						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e), MakeKeyhashRef());
 						return;
 					}
 					// If this is a CAST whose child is a LIST colref, replace the
@@ -670,7 +771,8 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 							PAC_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
 							                ") with CAST(pac_noised()->" + target_type.ToString() + ")");
 #endif
-							auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(cast_expr.child));
+							auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(cast_expr.child),
+							                                                 MakeKeyhashRef());
 							e = BoundCastExpression::AddCastToType(input.context, std::move(noised), target_type);
 							return;
 						}
@@ -719,7 +821,15 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				// PAC aggregate column: apply pac_noised to counter LIST, cast back to original type
 				auto counters_ref =
 				    make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(outermost->table_index, i));
-				auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref));
+				unique_ptr<Expression> keyhash_ref;
+				if (has_keyhash && keyhash_proj_indices[0] != DConstants::INVALID_INDEX) {
+					keyhash_ref = make_uniq<BoundColumnRefExpression>(
+					    LogicalType::UBIGINT, ColumnBinding(outermost->table_index, keyhash_proj_indices[0]));
+				} else {
+					keyhash_ref = make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
+				}
+				auto noised =
+				    input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref), std::move(keyhash_ref));
 				auto &orig_type = pac_aggs[it_pac->second].original_type;
 				if (orig_type != noised->return_type) {
 					noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), orig_type);
@@ -796,11 +906,23 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		vector<unique_ptr<Expression>> noised_proj_exprs;
 
 		for (idx_t i = 0; i < agg_bindings.size(); i++) {
+			// Skip keyhash column — internal, not part of query output
+			if (i == keyhash_agg_bindings_idx) {
+				continue;
+			}
 			auto &binding = agg_bindings[i];
 			auto it = pac_mean_column_map.find(HashBinding(binding));
 			if (it != pac_mean_column_map.end()) {
 				auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(mean_proj_idx, i));
-				auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref));
+				unique_ptr<Expression> keyhash_ref;
+				if (has_keyhash && keyhash_mean_proj_idx != DConstants::INVALID_INDEX) {
+					keyhash_ref = make_uniq<BoundColumnRefExpression>(
+					    LogicalType::UBIGINT, ColumnBinding(mean_proj_idx, keyhash_mean_proj_idx));
+				} else {
+					keyhash_ref = make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(0)));
+				}
+				auto noised =
+				    input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref), std::move(keyhash_ref));
 				// Cast back to the original aggregate return type (e.g. BIGINT for count)
 				for (auto &info : pac_aggs) {
 					if (info.agg_binding == binding && info.original_type != noised->return_type) {
@@ -819,8 +941,15 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		auto noised_proj = make_uniq<LogicalProjection>(noised_proj_idx, std::move(noised_proj_exprs));
 
 		// Build order remap: original aggregate bindings -> NoisedProj columns
-		for (idx_t i = 0; i < agg_bindings.size(); i++) {
-			order_remap[HashBinding(agg_bindings[i])] = ColumnBinding(noised_proj_idx, i);
+		{
+			idx_t noised_col = 0;
+			for (idx_t i = 0; i < agg_bindings.size(); i++) {
+				if (i == keyhash_agg_bindings_idx) {
+					continue;
+				}
+				order_remap[HashBinding(agg_bindings[i])] = ColumnBinding(noised_proj_idx, noised_col);
+				noised_col++;
+			}
 		}
 
 		// Step B3: Reassemble

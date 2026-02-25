@@ -579,6 +579,7 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 
 static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &list_vec = args.data[0];
+	auto &keyhash_vec = args.data[1];
 	idx_t count = args.size();
 
 	// Get mi and correction from bind data
@@ -601,6 +602,10 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 
 	UnifiedVectorFormat list_data;
 	list_vec.ToUnifiedFormat(count, list_data);
+
+	UnifiedVectorFormat keyhash_data;
+	keyhash_vec.ToUnifiedFormat(count, keyhash_data);
+	auto keyhash_values = UnifiedVectorFormat::GetData<uint64_t>(keyhash_data);
 
 	auto result_data = FlatVector::GetData<PAC_FLOAT>(result);
 	auto &result_validity = FlatVector::Validity(result);
@@ -628,20 +633,9 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 			continue;
 		}
 
-		// Reconstruct key_hash from NULL pattern and extract counter values
-		uint64_t key_hash = 0;
-		PAC_FLOAT counters[64];
-		for (idx_t j = 0; j < 64; j++) {
-			auto child_idx = child_data.sel->get_index(entry.offset + j);
-			if (child_data.validity.RowIsValid(child_idx)) {
-				// Non-NULL: set bit in key_hash and store value
-				key_hash |= (1ULL << j);
-				counters[j] = child_values[child_idx];
-			} else {
-				// NULL: bit stays 0, value doesn't matter (will be filtered out)
-				counters[j] = 0.0;
-			}
-		}
+		// Get key_hash from the second argument
+		auto kh_idx = keyhash_data.sel->get_index(i);
+		uint64_t key_hash = keyhash_data.validity.RowIsValid(kh_idx) ? keyhash_values[kh_idx] : 0;
 
 		// If no valid counters, return NULL
 		if (key_hash == 0) {
@@ -652,6 +646,13 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_validity.SetInvalid(i);
 			continue;
+		}
+
+		// Extract counter values from the list
+		PAC_FLOAT counters[64];
+		for (idx_t j = 0; j < 64; j++) {
+			auto child_idx = child_data.sel->get_index(entry.offset + j);
+			counters[j] = child_values[child_idx];
 		}
 
 		// Get noised sample from counters
@@ -1067,9 +1068,9 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	pac_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	loader.RegisterFunction(pac_coalesce);
 
-	// pac_noised(list<PAC_FLOAT>) -> PAC_FLOAT : Apply noise to 64 counter values
-	ScalarFunction pac_noised("pac_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
-	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	// pac_noised(list<PAC_FLOAT>, key_hash UBIGINT) -> PAC_FLOAT : Apply noise to 64 counter values
+	ScalarFunction pac_noised("pac_noised", {list_double_type, LogicalType::UBIGINT}, PacFloatLogicalType(),
+	                          PacNoisedFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(pac_noised);
 
 	// pac_filter_<cmp>: optimized comparison + filter in a single pass (no lambdas)
