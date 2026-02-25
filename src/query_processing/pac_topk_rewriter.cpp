@@ -24,6 +24,8 @@
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
 
+#include <cmath>
+
 namespace duckdb {
 
 // ============================================================================
@@ -86,6 +88,64 @@ void RegisterPacMeanFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	ScalarFunction pac_mean("pac_mean", {list_type}, PacFloatLogicalType(), PacMeanFunction);
 	loader.RegisterFunction(pac_mean);
+}
+
+// ============================================================================
+// pac_unnoised(LIST<PAC_FLOAT>) -> PAC_FLOAT
+// Extracts a single world's counter value for non-private ranking in TopK.
+// Per Xiaochen's "approach (b)": rank by a single world's value rather than
+// cross-world aggregation (pac_mean), to avoid distributional leakage.
+// Uses world 0 — arbitrary but deterministic. Any single world gives an
+// unbiased estimate since world assignment is random via the hash function.
+// NULL counters are replaced with 0 (per Xiaochen: "NULLs are replaced with
+// zeros" and "we must hide the secret value from 64 values, not a reduced set").
+// ============================================================================
+static void PacUnnoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &list_vec = args.data[0];
+	idx_t count = args.size();
+
+	UnifiedVectorFormat list_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+
+	auto result_data = FlatVector::GetData<PAC_FLOAT>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	auto &child_vec = ListVector::GetEntry(list_vec);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
+
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto list_idx = list_data.sel->get_index(i);
+
+		if (!list_data.validity.RowIsValid(list_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		auto &entry = list_entries[list_idx];
+
+		if (entry.length == 0) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		// Extract counter[0] — NULL counters become 0
+		auto child_idx = child_data.sel->get_index(entry.offset);
+		if (child_data.validity.RowIsValid(child_idx)) {
+			result_data[i] = child_values[child_idx];
+		} else {
+			result_data[i] = 0;
+		}
+	}
+}
+
+void RegisterPacUnnoisedFunction(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	ScalarFunction pac_unnoised("pac_unnoised", {list_type}, PacFloatLogicalType(), PacUnnoisedFunction);
+	loader.RegisterFunction(pac_unnoised);
 }
 
 // ============================================================================
@@ -405,6 +465,27 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// Maps original column bindings to NoisedProj bindings (populated by PATH A or B)
 	unordered_map<uint64_t, ColumnBinding> order_remap;
 
+	// Save original TopN limit/offset for the final TopN when expansion > 1
+	idx_t original_limit = ctx.topn->limit;
+	idx_t original_offset = ctx.topn->offset;
+
+	// Read expansion factor setting (superset approach)
+	double expansion = 1.0;
+	{
+		Value exp_val;
+		if (input.context.TryGetCurrentSetting("pac_topk_expansion", exp_val) && !exp_val.IsNull()) {
+			expansion = exp_val.GetValue<double>();
+			if (expansion < 1.0) {
+				expansion = 1.0;
+			}
+		}
+	}
+
+	// Apply expansion factor to inner TopN: select ceil(c * K) candidates
+	if (expansion > 1.0) {
+		ctx.topn->limit = static_cast<idx_t>(std::ceil(expansion * static_cast<double>(original_limit)));
+	}
+
 	auto &binder = input.optimizer.binder;
 	auto &agg = *ctx.aggregate;
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
@@ -526,7 +607,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	for (auto &info : pac_aggs) {
 		idx_t mean_col_idx = mean_proj_exprs.size();
 		auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, info.agg_binding);
-		auto mean_expr = input.optimizer.BindScalarFunction("pac_mean", std::move(counters_ref));
+		auto mean_expr = input.optimizer.BindScalarFunction("pac_unnoised", std::move(counters_ref));
 		mean_proj_exprs.push_back(std::move(mean_expr));
 		pac_mean_column_map[HashBinding(info.agg_binding)] = mean_col_idx;
 	}
@@ -970,10 +1051,11 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	}
 
 	// ==========================================================================
-	// Final Step: Add ORDER BY on top to re-sort by noised values.
-	// TopN selected the right top-k groups using true means, but after
-	// NoisedProj applies noise the output values no longer match the sort order.
-	// Re-sorting the small top-k result set by noised values is cheap.
+	// Final Step: Re-sort by noised values.
+	// After NoisedProj applies noise, values no longer match the sort order.
+	// When expansion > 1, the inner TopN selected c*K rows — we must also
+	// limit back to the original K via a final TopN. When expansion == 1,
+	// a simple ORDER BY suffices (the inner TopN already limited to K).
 	// ==========================================================================
 	vector<BoundOrderByNode> final_orders;
 	for (auto &saved : saved_orders) {
@@ -991,10 +1073,20 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		RemapToNoised(expr);
 		final_orders.push_back(BoundOrderByNode(saved.type, saved.null_order, std::move(expr)));
 	}
-	auto order_by = make_uniq<LogicalOrder>(std::move(final_orders));
-	order_by->children.push_back(std::move(plan));
-	order_by->ResolveOperatorTypes();
-	plan = std::move(order_by);
+
+	if (expansion > 1.0) {
+		// Superset: inner TopN selected c*K rows, final TopN limits to original K
+		auto final_topn = make_uniq<LogicalTopN>(std::move(final_orders), original_limit, original_offset);
+		final_topn->children.push_back(std::move(plan));
+		final_topn->ResolveOperatorTypes();
+		plan = std::move(final_topn);
+	} else {
+		// No expansion: re-sort the K rows by noised values
+		auto order_by = make_uniq<LogicalOrder>(std::move(final_orders));
+		order_by->children.push_back(std::move(plan));
+		order_by->ResolveOperatorTypes();
+		plan = std::move(order_by);
+	}
 
 #if PAC_DEBUG
 	PAC_DEBUG_PRINT("PACTopKRule: Successfully rewrote plan for top-k pushdown");

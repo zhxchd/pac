@@ -209,6 +209,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Add option to enable top-k pushdown: when true, top-k is applied on true aggregates before noising
 	db.config.AddExtensionOption("pac_pushdown_topk", "apply top-k before noise instead of after", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
+	// Expansion factor for top-k superset approach: inner TopN selects ceil(c*K) candidates,
+	// final TopN limits to K. With c=1 (default), no expansion. With c>1, more candidates
+	// are considered before noising and re-ranking, improving utility.
+	db.config.AddExtensionOption("pac_topk_expansion", "expansion factor for top-k superset (1 = no expansion)",
+	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
 	// Add option to control whether pac_hash() repairs hashes to exactly 32 bits set
 	db.config.AddExtensionOption("pac_hash_repair", "pac_hash() repairs hash to exactly 32 bits set",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
@@ -240,6 +245,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register pac_mean scalar function (used by top-k pushdown for ordering)
 	RegisterPacMeanFunction(loader);
+	// Register pac_unnoised scalar function (single-world extraction for top-k ranking)
+	RegisterPacUnnoisedFunction(loader);
 
 	// Register pac_keyhash aggregate function (UBIGINT -> UBIGINT, bitwise OR of key_hashes)
 	RegisterPacKeyHashFunction(loader);

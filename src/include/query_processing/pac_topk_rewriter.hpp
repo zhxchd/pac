@@ -49,6 +49,9 @@ public:
 // Register the pac_mean scalar function
 void RegisterPacMeanFunction(ExtensionLoader &loader);
 
+// Register the pac_unnoised scalar function (single-world extraction for TopK ranking)
+void RegisterPacUnnoisedFunction(ExtensionLoader &loader);
+
 } // namespace duckdb
 
 #endif // PAC_TOPK_REWRITER_HPP

@@ -162,8 +162,8 @@ ORDER BY
 ----
 logical_opt	<REGEX>:.*pac_sum.*
 
-# Test 2: Top-K pushdown transforms pac_sum to pac_mean for ORDER BY + LIMIT
-# The optimizer should convert pac_sum to pac_sum_counters and add pac_mean/pac_noised projections
+# Test 2: Top-K pushdown transforms pac_sum to pac_unnoised for ORDER BY + LIMIT
+# The optimizer should convert pac_sum to pac_sum_counters and add pac_unnoised/pac_noised projections
 query II
 EXPLAIN SELECT
     n_name,
@@ -183,7 +183,7 @@ ORDER BY
     revenue DESC
 LIMIT 2;
 ----
-logical_opt	<REGEX>:.*pac_mean.*
+logical_opt	<REGEX>:.*pac_unnoised.*
 
 # Test 3: Correlated subquery with COUNT - both inner and outer should be pac_count
 # Outer COUNT(*) groups customers by nation (multiple PUs per group) -> pac_count
@@ -247,7 +247,7 @@ logical_opt	<REGEX>:.*pac_sum.*
 
 # Test 5: Top-K pushdown with VARCHAR GROUP BY (triggers string decompress projection)
 # DuckDB inserts __internal_decompress_string between TopN and Aggregate for VARCHAR
-# group columns. The rewriter must keep these projections and still produce pac_mean.
+# group columns. The rewriter must keep these projections and still produce pac_unnoised.
 query II
 EXPLAIN SELECT
     n_name,
@@ -265,7 +265,7 @@ ORDER BY
     order_count DESC
 LIMIT 2;
 ----
-logical_opt	<REGEX>:.*pac_mean.*
+logical_opt	<REGEX>:.*pac_unnoised.*
 
 # Test 6: Top-K pushdown produces pac_noised in the final projection
 # The noised projection should appear above TopN to apply noise only to selected rows
@@ -305,7 +305,7 @@ FROM (
 ) t
 JOIN nation ON t.c_nationkey = n_nationkey;
 ----
-logical_opt	<REGEX>:.*pac_mean.*
+logical_opt	<REGEX>:.*pac_unnoised.*
 
 # ============================================================
 # CTE plan tests
@@ -559,8 +559,173 @@ LIMIT 2;
 ----
 logical_opt	<REGEX>:.*pac_keyhash.*
 
+# Test 22: Top-K superset expansion factor
+# With pac_topk_expansion = 2, the inner TopN selects 2*K candidates,
+# a final TopN limits back to K after noising. pac_unnoised should still appear.
+statement ok
+SET pac_topk_expansion = 2
+
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    SUM(l_extendedprice) AS total_price
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey
+ORDER BY
+    total_price DESC
+LIMIT 3;
+----
+logical_opt	<REGEX>:.*pac_unnoised.*
+
+statement ok
+SET pac_topk_expansion = 1
+
+# Test 23: Top-K with COUNT(*) uses pac_unnoised for ranking
+# COUNT(*) should also go through the pac_unnoised path, not just SUM.
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    COUNT(*) AS num_orders
+FROM
+    customer,
+    orders
+WHERE
+    c_custkey = o_custkey
+GROUP BY
+    c_nationkey
+ORDER BY
+    num_orders DESC
+LIMIT 2;
+----
+logical_opt	<REGEX>:.*pac_unnoised.*
+
+# Test 24: Top-K with multiple PAC aggregates
+# Both SUM and COUNT should be rewritten to _counters, and pac_unnoised should appear.
+query II
+EXPLAIN SELECT
+    c_nationkey,
+    SUM(l_extendedprice) AS total_price,
+    COUNT(*) AS num_items
+FROM
+    customer,
+    orders,
+    lineitem
+WHERE
+    c_custkey = o_custkey
+    AND l_orderkey = o_orderkey
+GROUP BY
+    c_nationkey
+ORDER BY
+    total_price DESC
+LIMIT 3;
+----
+logical_opt	<REGEX>:.*pac_unnoised.*
+
+# ============================================================
+# Execution tests: verify TopK pushdown produces valid results
+# ============================================================
+
 statement ok
 SET explain_output='physical_only';
+
+# Test 25: Top-K execution — SUM with LIMIT produces correct row count
+# The rewritten plan should produce actual results without crashing.
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        c_nationkey,
+        SUM(l_extendedprice) AS total_price
+    FROM
+        customer,
+        orders,
+        lineitem
+    WHERE
+        c_custkey = o_custkey
+        AND l_orderkey = o_orderkey
+    GROUP BY
+        c_nationkey
+    ORDER BY
+        total_price DESC
+    LIMIT 3
+);
+----
+3
+
+# Test 26: Top-K execution — COUNT with VARCHAR GROUP BY
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        n_name,
+        COUNT(*) AS order_count
+    FROM
+        orders,
+        customer,
+        nation
+    WHERE
+        o_custkey = c_custkey
+        AND c_nationkey = n_nationkey
+    GROUP BY
+        n_name
+    ORDER BY
+        order_count DESC
+    LIMIT 2
+);
+----
+2
+
+# Test 27: Top-K execution with expansion factor
+# With expansion = 3, inner TopN selects 3*2=6 candidates, final TopN limits to 2.
+# Should still produce exactly 2 rows.
+statement ok
+SET pac_topk_expansion = 3
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        c_nationkey,
+        SUM(l_extendedprice) AS total_price
+    FROM
+        customer,
+        orders,
+        lineitem
+    WHERE
+        c_custkey = o_custkey
+        AND l_orderkey = o_orderkey
+    GROUP BY
+        c_nationkey
+    ORDER BY
+        total_price DESC
+    LIMIT 2
+);
+----
+2
+
+statement ok
+SET pac_topk_expansion = 1
+
+# Test 28: Top-K execution — join on top of TopK subquery produces results
+query I
+SELECT COUNT(*) FROM (
+    SELECT t.c_nationkey, t.total_price, n_name
+    FROM (
+        SELECT c_nationkey, SUM(l_extendedprice) AS total_price
+        FROM customer, orders, lineitem
+        WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey
+        GROUP BY c_nationkey
+        ORDER BY total_price DESC
+        LIMIT 3
+    ) t
+    JOIN nation ON t.c_nationkey = n_nationkey
+);
+----
+3
 
 # ============================================================
 # Cleanup
