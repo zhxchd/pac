@@ -4,5 +4,5 @@ WITH revenue AS (SELECT l_suppkey AS supplier_no, pac_sum(hash(orders.o_custkey)
                  GROUP BY l_suppkey)
 SELECT s_suppkey, s_name, s_address, s_phone, total_revenue
 FROM supplier JOIN revenue ON s_suppkey = supplier_no
-WHERE total_revenue = (SELECT max(total_revenue), FROM revenue)
+WHERE total_revenue = (SELECT max(total_revenue) FROM revenue)
 ORDER BY s_suppkey;
