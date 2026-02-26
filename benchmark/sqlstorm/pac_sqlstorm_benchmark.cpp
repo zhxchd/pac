@@ -774,13 +774,6 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 			worker = make_uniq<QueryWorker>();
 		}
 
-		// Periodically reconnect as a safety net
-		if ((i + 1) % 1000 == 0) {
-			Log("[" + label + "] periodic reconnect to reclaim memory (" + std::to_string(i + 1) + "/" + std::to_string(total) + ")");
-			worker.reset();
-			reconnect();
-			worker = make_uniq<QueryWorker>();
-		}
 	}
 
 	return summaries;
