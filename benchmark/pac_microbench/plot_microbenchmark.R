@@ -97,11 +97,11 @@ MINMAX_VARIANT_NAMES <- c(
   'standard' = 'DuckDB',
   'default' = 'Buffering+Pruning',
   'nobuffering' = 'Pruning',
-  'noboundopt' = 'Naive/SIMD-Unfriendly'
+  'noboundopt' = 'No Pruning'
 )
 
 MINMAX_VARIANT_ORDER <- c('DuckDB', 'Buffering+Pruning',
-                          'Pruning', 'Naive/SIMD-Unfriendly')
+                          'Pruning', 'No Pruning')
 
 
 # SIMD aggregate colors - unique colors for each aggregate
@@ -125,7 +125,8 @@ VARIANT_PATTERNS <- c(
   'Buffering+Pruning' = 'stripe',
   'Pruning' = 'crosshatch',
   'DuckDB' = 'none',
-  'Naive/SIMD-Unfriendly' = 'circle'
+  'Naive/SIMD-Unfriendly' = 'circle',
+  'No Pruning' = 'circle'
 )
 
 # Unified color mapping for all variants (combines COUNT, SUM, MINMAX colors)
@@ -144,7 +145,9 @@ VARIANT_COLORS <- c(
   # Alternative methods (orange)
   'Exact' = '#ffff00',
   # Naive/unoptimized (red)
-  'Naive/SIMD-Unfriendly' = '#ff5c33'
+  'Naive/SIMD-Unfriendly' = '#ff5c33',
+  # No Pruning (white)
+  'No Pruning' = '#ffffff'
 )
 
 AGG_PATTERNS <- c(
