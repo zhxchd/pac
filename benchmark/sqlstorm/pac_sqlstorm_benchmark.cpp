@@ -615,7 +615,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 	// Track previous query name+state for crash attribution
 	string prev_name;
 	uint8_t prev_state_int = 1; // error
-	QueryWorker worker;
+	auto worker = make_uniq<QueryWorker>();
 
 	auto reconnect = [&]() {
 		con.reset();
@@ -663,7 +663,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 			continue;
 		}
 
-		auto qr = RunQuery(worker, *con, name, sql, timeout_s);
+		auto qr = RunQuery(*worker, *con, name, sql, timeout_s);
 
 		if (qr.state == "success") {
 			stats.success++;
@@ -702,7 +702,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 				}
 				Log("  reconnecting...");
 				reconnect();
-				qr = RunQuery(worker, *con, name, sql, timeout_s);
+				qr = RunQuery(*worker, *con, name, sql, timeout_s);
 				if (qr.state == "success") {
 					stats.success++;
 					stats.total_success_time += qr.time_ms;
@@ -761,6 +761,16 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		// Periodically force checkpoint to reclaim DuckDB memory
 		if ((i + 1) % 100 == 0) {
 			try { con->Query("FORCE CHECKPOINT"); } catch (...) {}
+		}
+
+		// Periodically reconnect to fully reclaim memory from interrupted queries
+		// (DuckDB's soft memory limit can be exceeded by temp allocations during
+		// query execution, and interrupted queries may not fully release memory)
+		if ((i + 1) % 2000 == 0) {
+			Log("[" + label + "] periodic reconnect to reclaim memory (" + std::to_string(i + 1) + "/" + std::to_string(total) + ")");
+			worker.reset();
+			reconnect();
+			worker = make_uniq<QueryWorker>();
 		}
 	}
 
