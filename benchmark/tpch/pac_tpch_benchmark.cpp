@@ -309,6 +309,7 @@ static void PacDBDropTables(Connection &con) {
 
 // Create all PAC-DB sampling tables once (customer-based, orders-based, q21 extras)
 static void PacDBCreateTables(Connection &con) {
+    PacDBDropTables(con);
     con.Query(
         "CREATE TABLE random_samples AS "
         "WITH sample_numbers AS MATERIALIZED ("
