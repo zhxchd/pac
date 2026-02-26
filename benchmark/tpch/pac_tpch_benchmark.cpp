@@ -430,44 +430,55 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 
             // Run baseline (PRAGMA tpch) if not already cached for this query number
             if (baseline_cache.find(entry.query_number) == baseline_cache.end()) {
-                string pragma = "PRAGMA tpch(" + std::to_string(entry.query_number) + ");";
+                double baseline_median = -1;
+                try {
+                    string pragma = "PRAGMA tpch(" + std::to_string(entry.query_number) + ");";
 
-                // Cold run (do not time)
-                {
-                    auto r_cold = con.Query(pragma);
-                    if (r_cold && r_cold->HasError()) {
-                        Log(string("Cold PRAGMA tpch(") + std::to_string(entry.query_number) + ") error: " + r_cold->GetError());
+                    // Cold run (do not time)
+                    {
+                        auto r_cold = con.Query(pragma);
+                        if (r_cold && r_cold->HasError()) {
+                            Log(string("Cold PRAGMA tpch(") + std::to_string(entry.query_number) + ") error: " + r_cold->GetError());
+                        }
+                        Log("Cold run completed for TPCH query " + std::to_string(entry.query_number));
                     }
-                    Log("Cold run completed for TPCH query " + std::to_string(entry.query_number));
-                }
 
-                // 1st warm run (do not time) to warm caches
-                {
-                    auto r_warm_init = con.Query(pragma);
-                    if (r_warm_init && r_warm_init->HasError()) {
-                        Log(string("Warm (init) PRAGMA tpch(") + std::to_string(entry.query_number) + ") error: " + r_warm_init->GetError());
+                    // 1st warm run (do not time) to warm caches
+                    {
+                        auto r_warm_init = con.Query(pragma);
+                        if (r_warm_init && r_warm_init->HasError()) {
+                            Log(string("Warm (init) PRAGMA tpch(") + std::to_string(entry.query_number) + ") error: " + r_warm_init->GetError());
+                        }
+                        Log("Warm (init) run completed for TPCH query " + std::to_string(entry.query_number));
                     }
-                    Log("Warm (init) run completed for TPCH query " + std::to_string(entry.query_number));
-                }
 
-                // Wait 0.5s before timed hot runs
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    // Wait 0.5s before timed hot runs
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-                // Hot runs: 5 runs, take median
-                vector<double> tpch_times_ms;
-                for (int t = 1; t <= 5; ++t) {
-                    auto t0 = std::chrono::steady_clock::now();
-                    auto r_warm = con.Query(pragma);
-                    auto t1 = std::chrono::steady_clock::now();
-                    double tpch_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                    tpch_times_ms.push_back(tpch_time_ms);
-                    Log("TPCH query " + std::to_string(entry.query_number) + " hot run " + std::to_string(t) + " time (ms): " + FormatNumber(tpch_time_ms));
-                    if (r_warm && r_warm->HasError()) {
-                        Log(string("TPCH hot run error for query ") + std::to_string(entry.query_number) + ": " + r_warm->GetError());
+                    // Hot runs: 5 runs, take median
+                    vector<double> tpch_times_ms;
+                    bool hot_run_failed = false;
+                    for (int t = 1; t <= 5; ++t) {
+                        auto t0 = std::chrono::steady_clock::now();
+                        auto r_warm = con.Query(pragma);
+                        auto t1 = std::chrono::steady_clock::now();
+                        double tpch_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                        if (r_warm && r_warm->HasError()) {
+                            Log(string("TPCH hot run error for query ") + std::to_string(entry.query_number) + ": " + r_warm->GetError());
+                            hot_run_failed = true;
+                            break;
+                        }
+                        tpch_times_ms.push_back(tpch_time_ms);
+                        Log("TPCH query " + std::to_string(entry.query_number) + " hot run " + std::to_string(t) + " time (ms): " + FormatNumber(tpch_time_ms));
                     }
+                    if (!hot_run_failed && !tpch_times_ms.empty()) {
+                        baseline_median = Median(tpch_times_ms);
+                        Log("TPCH query " + std::to_string(entry.query_number) + " median (ms): " + FormatNumber(baseline_median));
+                    }
+                } catch (const std::exception &e) {
+                    Log("Baseline Q" + std::to_string(entry.query_number) + " exception: " + string(e.what()));
+                    baseline_median = -1;
                 }
-                double baseline_median = Median(tpch_times_ms);
-                Log("TPCH query " + std::to_string(entry.query_number) + " median (ms): " + FormatNumber(baseline_median));
                 baseline_cache[entry.query_number] = baseline_median;
             }
 
@@ -505,22 +516,34 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
             for (auto &pv : pac_variants) {
                 const string &mode_str = pv.first;
                 const string &pac_sql = pv.second;
-                // Run PAC query 5 times, take median
-                vector<double> pac_times_ms;
-                for (int run = 1; run <= 5; ++run) {
-                    auto t0 = std::chrono::steady_clock::now();
-                    auto r_pac = con.Query(pac_sql);
-                    auto t1 = std::chrono::steady_clock::now();
-                    double pac_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                    if (r_pac && r_pac->HasError()) {
-                        throw std::runtime_error("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) + " error: " + r_pac->GetError());
+                try {
+                    // Run PAC query 5 times, take median
+                    vector<double> pac_times_ms;
+                    bool pac_failed = false;
+                    for (int run = 1; run <= 5; ++run) {
+                        auto t0 = std::chrono::steady_clock::now();
+                        auto r_pac = con.Query(pac_sql);
+                        auto t1 = std::chrono::steady_clock::now();
+                        double pac_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                        if (r_pac && r_pac->HasError()) {
+                            Log("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) + " error: " + r_pac->GetError());
+                            pac_failed = true;
+                            break;
+                        }
+                        pac_times_ms.push_back(pac_time_ms);
+                        Log("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) + " time (ms): " + FormatNumber(pac_time_ms));
                     }
-                    pac_times_ms.push_back(pac_time_ms);
-                    Log("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) + " time (ms): " + FormatNumber(pac_time_ms));
+                    if (pac_failed) {
+                        csv << entry.label << "," << mode_str << ",-1\n";
+                    } else {
+                        double pac_median = Median(pac_times_ms);
+                        Log("PAC (" + mode_str + ") " + entry.label + " median (ms): " + FormatNumber(pac_median));
+                        csv << entry.label << "," << mode_str << "," << FormatNumber(pac_median) << "\n";
+                    }
+                } catch (const std::exception &e) {
+                    Log("PAC (" + mode_str + ") " + entry.label + " exception: " + string(e.what()));
+                    csv << entry.label << "," << mode_str << ",-1\n";
                 }
-                double pac_median = Median(pac_times_ms);
-                Log("PAC (" + mode_str + ") " + entry.label + " median (ms): " + FormatNumber(pac_median));
-                csv << entry.label << "," << mode_str << "," << FormatNumber(pac_median) << "\n";
             }
         }
 
