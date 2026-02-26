@@ -622,6 +622,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		db.reset();
 		db = make_uniq<DuckDB>(db_path.c_str());
 		con = make_uniq<Connection>(*db);
+		con->Query("PRAGMA threads=16");
 		con->Query("INSTALL icu");
 		con->Query("LOAD icu");
 		con->Query("INSTALL tpch");
@@ -766,7 +767,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		// Periodically reconnect to fully reclaim memory from interrupted queries
 		// (DuckDB's soft memory limit can be exceeded by temp allocations during
 		// query execution, and interrupted queries may not fully release memory)
-		if ((i + 1) % 2000 == 0) {
+		if ((i + 1) % 1000 == 0) {
 			Log("[" + label + "] periodic reconnect to reclaim memory (" + std::to_string(i + 1) + "/" + std::to_string(total) + ")");
 			worker.reset();
 			reconnect();
@@ -1146,6 +1147,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				db.reset();
 				db = make_uniq<DuckDB>(db_path.c_str());
 				con = make_uniq<Connection>(*db);
+				con->Query("PRAGMA threads=16");
 				con->Query("INSTALL icu");
 				con->Query("LOAD icu");
 				auto ri = con->Query("INSTALL tpch");
@@ -1321,6 +1323,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				so_db.reset();
 				so_db = make_uniq<DuckDB>(so_db_path.c_str());
 				so_con = make_uniq<Connection>(*so_db);
+				so_con->Query("PRAGMA threads=16");
 				so_con->Query("INSTALL icu; LOAD icu;");
 				auto r = so_con->Query("LOAD pac");
 				if (r->HasError()) {
