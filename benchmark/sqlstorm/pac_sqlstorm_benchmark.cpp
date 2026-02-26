@@ -623,6 +623,7 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		db = make_uniq<DuckDB>(db_path.c_str());
 		con = make_uniq<Connection>(*db);
 		con->Query("PRAGMA threads=16");
+		con->Query("PRAGMA memory_limit='25GB'");
 		con->Query("INSTALL icu");
 		con->Query("LOAD icu");
 		con->Query("INSTALL tpch");
@@ -1155,6 +1156,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				db = make_uniq<DuckDB>(db_path.c_str());
 				con = make_uniq<Connection>(*db);
 				con->Query("PRAGMA threads=16");
+				con->Query("PRAGMA memory_limit='25GB'");
 				con->Query("INSTALL icu");
 				con->Query("LOAD icu");
 				auto ri = con->Query("INSTALL tpch");
@@ -1331,6 +1333,7 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				so_db = make_uniq<DuckDB>(so_db_path.c_str());
 				so_con = make_uniq<Connection>(*so_db);
 				so_con->Query("PRAGMA threads=16");
+				so_con->Query("PRAGMA memory_limit='25GB'");
 				so_con->Query("INSTALL icu; LOAD icu;");
 				auto r = so_con->Query("LOAD pac");
 				if (r->HasError()) {
