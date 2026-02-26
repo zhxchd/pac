@@ -2,31 +2,6 @@
 --var:INDEX_COLS = []
 --var:OUTPUT_COLS = ['promo_revenue']
 
---begin SAMPLE_STEP--
-DROP TABLE IF EXISTS random_samples;
-
-CREATE TEMP TABLE random_samples AS
-WITH sample_numbers AS MATERIALIZED (
-    SELECT range AS sample_id FROM range(128)
-), random_values AS MATERIALIZED (
-    SELECT
-        sample_numbers.sample_id,
-        orders.rowid AS row_id,
-        (RANDOM() > 0.5)::BOOLEAN AS random_binary
-    FROM sample_numbers
-    JOIN orders ON TRUE  -- Cross join to duplicate rows for each sample
-)
-SELECT
-    sample_id,
-    row_id,
-    random_binary
-FROM random_values
-ORDER BY sample_id, row_id;
---end SAMPLE_STEP--
-
-
---begin PREPARE_STEP--
-
 PREPARE run_query AS
 SELECT
     100.00 * sum(
@@ -40,7 +15,7 @@ FROM
     part,
     orders,
     customer,
-    random_samples AS rs
+    random_samples_orders AS rs
 WHERE
     rs.row_id = orders.rowid
     AND rs.random_binary = TRUE
@@ -50,7 +25,5 @@ WHERE
     AND l_partkey = p_partkey
     AND l_shipdate >= date '1995-09-01'
     AND l_shipdate < CAST('1995-10-01' AS date);
---end PREPARE_STEP--
-
 
 EXECUTE run_query(sample := 0);

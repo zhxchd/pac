@@ -2,31 +2,6 @@
 --var:INDEX_COLS = ['l_shipmode']
 --var:OUTPUT_COLS = ['high_line_count', 'low_line_count']
 
---begin SAMPLE_STEP--
-DROP TABLE IF EXISTS random_samples;
-
-CREATE TEMP TABLE random_samples AS
-WITH sample_numbers AS MATERIALIZED (
-    SELECT range AS sample_id FROM range(128)
-), random_values AS MATERIALIZED (
-    SELECT
-        sample_numbers.sample_id,
-        orders.rowid AS row_id,
-        (RANDOM() > 0.5)::BOOLEAN AS random_binary
-    FROM sample_numbers
-    JOIN orders ON TRUE  -- Cross join to duplicate rows for each sample
-)
-SELECT
-    sample_id,
-    row_id,
-    random_binary
-FROM random_values
-ORDER BY sample_id, row_id;
---end SAMPLE_STEP--
-
-
---begin PREPARE_STEP--
-
 PREPARE run_query AS
 SELECT
     l_shipmode,
@@ -48,7 +23,7 @@ FROM
     customer,
     lineitem,
     (SELECT * FROM orders
-        JOIN random_samples AS rs ON rs.row_id = orders.rowid
+        JOIN random_samples_orders AS rs ON rs.row_id = orders.rowid
         AND rs.random_binary = TRUE
         AND rs.sample_id = $sample) AS orders
 WHERE
@@ -63,7 +38,5 @@ GROUP BY
     l_shipmode
 ORDER BY
     l_shipmode;
---end PREPARE_STEP--
-
 
 EXECUTE run_query(sample := 0);

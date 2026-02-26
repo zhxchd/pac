@@ -299,6 +299,58 @@ static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir
     return false;
 }
 
+// Drop all PAC-DB helper tables
+static void PacDBDropTables(Connection &con) {
+    con.Query("DROP INDEX IF EXISTS idx_lineitem_enhanced_order_supp;");
+    con.Query("DROP TABLE IF EXISTS lineitem_enhanced;");
+    con.Query("DROP TABLE IF EXISTS random_samples;");
+    con.Query("DROP TABLE IF EXISTS random_samples_orders;");
+}
+
+// Create all PAC-DB sampling tables once (customer-based, orders-based, q21 extras)
+static void PacDBCreateTables(Connection &con) {
+    con.Query(
+        "CREATE TABLE random_samples AS "
+        "WITH sample_numbers AS MATERIALIZED ("
+        "  SELECT range AS sample_id FROM range(128)"
+        "), random_values AS MATERIALIZED ("
+        "  SELECT sample_numbers.sample_id, customer.rowid AS row_id,"
+        "         (RANDOM() > 0.5)::BOOLEAN AS random_binary"
+        "  FROM sample_numbers JOIN customer ON TRUE"
+        ") "
+        "SELECT sample_id, row_id, random_binary "
+        "FROM random_values "
+        "ORDER BY sample_id, row_id;");
+    con.Query(
+        "CREATE TABLE random_samples_orders AS "
+        "WITH sample_numbers AS MATERIALIZED ("
+        "  SELECT range AS sample_id FROM range(128)"
+        "), random_values AS MATERIALIZED ("
+        "  SELECT sample_numbers.sample_id, orders.rowid AS row_id,"
+        "         (RANDOM() > 0.5)::BOOLEAN AS random_binary"
+        "  FROM sample_numbers JOIN orders ON TRUE"
+        ") "
+        "SELECT sample_id, row_id, random_binary "
+        "FROM random_values "
+        "ORDER BY sample_id, row_id;");
+    con.Query(
+        "CREATE TABLE lineitem_enhanced AS "
+        "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
+        "  c.rowid AS c_rowid, s.s_name AS s_name,"
+        "  (l.l_receiptdate > l.l_commitdate) AS is_late,"
+        "  (o.o_orderstatus = 'F') AS is_orderstatus_f,"
+        "  (n.n_name = 'SAUDI ARABIA') AS is_nation_saudi_arabia "
+        "FROM lineitem l "
+        "JOIN orders o ON o.o_orderkey = l.l_orderkey "
+        "JOIN customer c ON c.c_custkey = o.o_custkey "
+        "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
+        "JOIN nation n ON s.s_nationkey = n.n_nationkey "
+        "ORDER BY l.l_orderkey, l.l_linenumber;");
+    con.Query(
+        "CREATE INDEX idx_lineitem_enhanced_order_supp "
+        "ON lineitem_enhanced(l_orderkey, l_suppkey);");
+}
+
 int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive, bool run_simple_hash, bool run_pacdb, int threads) {
     try {
         Log(string("run_naive flag: ") + (run_naive ? string("true") : string("false")));
@@ -426,6 +478,14 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 
     	// Cache baseline median per query number (avoid re-running for variants like q08-nolambda)
     	std::map<int, double> baseline_cache;
+
+        // Create PAC-DB sampling tables once before the query loop (not timed)
+        if (run_pacdb) {
+            PacDBDropTables(con);
+            Log("Creating PAC-DB sampling tables...");
+            PacDBCreateTables(con);
+            Log("PAC-DB sampling tables created.");
+        }
 
         for (auto &entry : query_entries) {
             Log("=== " + entry.label + " (Q" + std::to_string(entry.query_number) + ") ===");
@@ -555,22 +615,25 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
                     string pacdb_sql = ReadFileToString(pacdb_qfile);
                     if (!pacdb_sql.empty()) {
                         try {
-                            // Split at last EXECUTE to get setup_sql and execute_sql
+                            // Split at EXECUTE to get prepare_sql and execute_sql
                             auto exec_pos = pacdb_sql.rfind("EXECUTE");
                             if (exec_pos == string::npos) {
                                 Log("PAC-DB " + entry.label + ": no EXECUTE found in query file, skipping");
                                 csv << entry.label << ",PAC-DB,-1\n";
                             } else {
-                                string setup_sql = pacdb_sql.substr(0, exec_pos);
+                                string prepare_sql = pacdb_sql.substr(0, exec_pos);
                                 string execute_sql = pacdb_sql.substr(exec_pos);
 
-                                // Deallocate any previous prepared statement (ignore error)
+                                // Prepare the query (not timed)
+                                bool setup_ok = true;
                                 con.Query("DEALLOCATE PREPARE run_query;");
+                                auto r_prep = con.Query(prepare_sql);
+                                if (r_prep && r_prep->HasError()) {
+                                    Log("PAC-DB " + entry.label + " prepare error: " + r_prep->GetError());
+                                    setup_ok = false;
+                                }
 
-                                // Run setup: creates random_samples table + PREPARE statement
-                                auto r_setup = con.Query(setup_sql);
-                                if (r_setup && r_setup->HasError()) {
-                                    Log("PAC-DB " + entry.label + " setup error: " + r_setup->GetError());
+                                if (!setup_ok) {
                                     csv << entry.label << ",PAC-DB,-1\n";
                                 } else {
                                     // Time EXECUTE 5 times, take median
@@ -597,6 +660,7 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
                                         csv << entry.label << ",PAC-DB," << FormatNumber(pacdb_median) << "\n";
                                     }
                                 }
+                                con.Query("DEALLOCATE PREPARE run_query;");
                             }
                         } catch (const std::exception &e) {
                             Log("PAC-DB " + entry.label + " exception: " + string(e.what()));
@@ -607,6 +671,11 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
                     Log("PAC-DB " + entry.label + ": no query file found at " + pacdb_qfile + ", skipping");
                 }
             }
+        }
+
+        // Drop PAC-DB tables after all queries
+        if (run_pacdb) {
+            PacDBDropTables(con);
         }
 
          csv.close();
