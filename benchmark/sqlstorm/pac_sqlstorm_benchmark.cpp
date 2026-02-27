@@ -793,15 +793,12 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 			worker = make_uniq<QueryWorker>();
 		}
 
-		// Periodically force checkpoint to reclaim DuckDB memory
-		// Use a separate connection since FORCE CHECKPOINT cannot run
-		// when the main connection has an active transaction.
+		// Periodically checkpoint to reclaim DuckDB memory
 		if ((i + 1) % 100 == 0 && !just_reconnected) {
 			try {
-				Connection ckpt_con(*db);
-				auto r = ckpt_con.Query("FORCE CHECKPOINT");
+				auto r = con->Query("CHECKPOINT");
 				if (r->HasError()) {
-					Log("FORCE CHECKPOINT error: " + r->GetError());
+					Log("CHECKPOINT error: " + r->GetError());
 				}
 			} catch (...) {}
 		}
