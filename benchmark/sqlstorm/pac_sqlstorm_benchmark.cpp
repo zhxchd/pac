@@ -476,8 +476,22 @@ struct QueryWorker {
 		}
 	}
 
-	// Submit a query; blocks until the query completes or timeout triggers an interrupt.
+	bool memory_killed = false;
+
+	// Read current process RSS from /proc/self/statm
+	static size_t GetRSSBytes() {
+		FILE *f = fopen("/proc/self/statm", "r");
+		if (!f) return 0;
+		long pages = 0, rss = 0;
+		if (fscanf(f, "%ld %ld", &pages, &rss) != 2) { rss = 0; }
+		fclose(f);
+		return static_cast<size_t>(rss) * static_cast<size_t>(sysconf(_SC_PAGESIZE));
+	}
+
+	// Submit a query; blocks until the query completes, timeout, or memory limit hit.
+	// Polls every 500ms to check RSS; interrupts if > 25GB.
 	void Submit(Connection &c, const string &q, double timeout_s) {
+		memory_killed = false;
 		{
 			std::lock_guard<std::mutex> lk(mtx);
 			con = &c;
@@ -491,12 +505,28 @@ struct QueryWorker {
 
 		auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s);
 		std::unique_lock<std::mutex> lk(mtx);
-		if (!cv_done.wait_until(lk, deadline, [this]() { return work_done; })) {
-			// Timed out — interrupt and wait for worker to finish
-			lk.unlock();
-			c.Interrupt();
-			lk.lock();
-			cv_done.wait(lk, [this]() { return work_done; });
+		while (!work_done) {
+			auto poll_until = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(500));
+			cv_done.wait_until(lk, poll_until, [this]() { return work_done; });
+			if (work_done) break;
+			// Check timeout
+			if (std::chrono::steady_clock::now() >= deadline) {
+				lk.unlock();
+				c.Interrupt();
+				lk.lock();
+				cv_done.wait(lk, [this]() { return work_done; });
+				break;
+			}
+			// Check memory usage
+			size_t rss = GetRSSBytes();
+			if (rss > 25ULL * 1024 * 1024 * 1024) {
+				memory_killed = true;
+				lk.unlock();
+				c.Interrupt();
+				lk.lock();
+				cv_done.wait(lk, [this]() { return work_done; });
+				break;
+			}
 		}
 	}
 };
@@ -513,6 +543,14 @@ static BenchmarkQueryResult RunQuery(QueryWorker &worker, Connection &con, const
 		worker.Submit(con, sql, timeout_s);
 		auto end = std::chrono::steady_clock::now();
 		qr.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+		// Memory limit killed this query — treat as timeout
+		if (worker.memory_killed) {
+			qr.state = "timeout";
+			qr.error = "memory limit exceeded (RSS > 25GB)";
+			worker.result.reset();
+			return qr;
+		}
 
 		if (worker.exception) {
 			std::rethrow_exception(worker.exception);
@@ -630,6 +668,10 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 		auto r2 = con->Query("PRAGMA memory_limit='16GB'");
 		if (r2->HasError()) {
 			Log("PRAGMA memory_limit error: " + r2->GetError());
+		}
+		auto r_temp = con->Query("SET temp_directory='/tmp/duckdb_temp'");
+		if (r_temp->HasError()) {
+			Log("SET temp_directory error: " + r_temp->GetError());
 		}
 		auto r3 = con->Query("INSTALL icu");
 		if (r3->HasError()) {
@@ -1186,6 +1228,10 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				if (r2->HasError()) {
 					Log("PRAGMA memory_limit error: " + r2->GetError());
 				}
+				auto r_temp = con->Query("SET temp_directory='/tmp/duckdb_temp'");
+				if (r_temp->HasError()) {
+					Log("SET temp_directory error: " + r_temp->GetError());
+				}
 				auto r3 = con->Query("INSTALL icu");
 				if (r3->HasError()) {
 					Log("INSTALL icu error: " + r3->GetError());
@@ -1377,6 +1423,10 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 				auto r2 = so_con->Query("PRAGMA memory_limit='16GB'");
 				if (r2->HasError()) {
 					Log("PRAGMA memory_limit error: " + r2->GetError());
+				}
+				auto r_temp = so_con->Query("SET temp_directory='/tmp/duckdb_temp'");
+				if (r_temp->HasError()) {
+					Log("SET temp_directory error: " + r_temp->GetError());
 				}
 				auto r3 = so_con->Query("INSTALL icu");
 				if (r3->HasError()) {
