@@ -675,7 +675,7 @@ static void PrintUsageMain() {
               << "                    Uses clickbench_micro.db by default\n"
               << "  --db <path>       DuckDB database file (default: clickbench.db or clickbench_micro.db)\n"
               << "  --queries <dir>   Directory containing create.sql, load.sql, queries.sql\n"
-              << "                    (default: benchmark/clickbench_queries)\n"
+              << "                    (default: benchmark/clickbench/clickbench_queries)\n"
               << "  --out <csv>       Output CSV path (default: benchmark/clickbench_results.csv)\n"
               << "  -h, --help        Show this help message\n";
 }
@@ -684,7 +684,7 @@ int main(int argc, char **argv) {
     // Parse arguments
     bool micro = false;
     std::string db_path;
-    std::string queries_dir = "benchmark/clickbench_queries";
+    std::string queries_dir = "benchmark/clickbench/clickbench_queries";
     std::string out_csv;
 
     for (int i = 1; i < argc; ++i) {

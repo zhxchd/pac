@@ -22,13 +22,13 @@ namespace duckdb {
 //
 // Parameters:
 // - db_path: path to DuckDB database file (default "clickbench.db")
-// - queries_dir: directory containing create.sql, load.sql, and queries.sql (default "benchmark/clickbench_queries")
+// - queries_dir: directory containing create.sql, load.sql, and queries.sql (default "benchmark/clickbench/clickbench_queries")
 // - out_csv: output CSV path (if empty, auto-named)
 // - micro: if true, use a smaller subset for quick testing
 //
 // Returns 0 on success, non-zero on error.
 int RunClickHouseBenchmark(const string &db_path = "clickbench.db",
-                           const string &queries_dir = "benchmark/clickbench_queries",
+                           const string &queries_dir = "benchmark/clickbench/clickbench_queries",
                            const string &out_csv = "",
                            bool micro = false);
 
