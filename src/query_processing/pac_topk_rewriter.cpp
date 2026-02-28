@@ -192,23 +192,24 @@ void RegisterPacUnnoisedFunction(ExtensionLoader &loader) {
 // re-ranked by the final TopN.
 //
 // This is implemented as a custom DuckDB window aggregate:
-//   window_init: scans all rows, ranks by counter[J] descending, marks
-//                top-K rows in a boolean vector
+//   window_init: for each of the 64 worlds, independently find the top-K groups
+//                by that world's counter value, then union all 64 per-world top-K
+//                sets to form the superset (marks membership in a boolean vector)
 //   window:      returns the precomputed boolean for each row
 // ============================================================================
 
-// Bind data: stores K (the TopN limit) and the world index J
+// Bind data: stores K (the per-world TopN limit) and the ranking direction
 struct PacTopKSupersetBindData : public FunctionData {
 	idx_t k;
-	idx_t world_idx; // J = query_hash % 64
-	PacTopKSupersetBindData(idx_t k, idx_t world_idx) : k(k), world_idx(world_idx) {
+	bool ascending; // true if ORDER BY ASC (per-world ranking picks smallest K), false for DESC (largest K)
+	PacTopKSupersetBindData(idx_t k, bool ascending) : k(k), ascending(ascending) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<PacTopKSupersetBindData>(k, world_idx);
+		return make_uniq<PacTopKSupersetBindData>(k, ascending);
 	}
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacTopKSupersetBindData>();
-		return k == o.k && world_idx == o.world_idx;
+		return k == o.k && ascending == o.ascending;
 	}
 };
 
@@ -235,13 +236,16 @@ static void PacTopKSupersetDestroy(Vector &state_vec, AggregateInputData &, idx_
 	}
 }
 
-// window_init: scan all rows, rank by counter[J] descending, mark top-K
+// window_init: for each of the 64 worlds, independently find the top-K groups
+// by that world's counter value, then take the union of all 64 per-world top-K
+// sets as the superset. This ensures the superset is determined by ALL worlds
+// (not just the secret world), preserving PAC privacy for the output key set.
 static void PacTopKSupersetWindowInit(AggregateInputData &aggr_input_data, const WindowPartitionInput &partition,
                                       data_ptr_t g_state) {
 	auto &state = *reinterpret_cast<PacTopKSupersetState *>(g_state);
 	auto &bind_data = aggr_input_data.bind_data->Cast<PacTopKSupersetBindData>();
 	idx_t K = bind_data.k;
-	idx_t J = bind_data.world_idx;
+	bool ascending = bind_data.ascending;
 	auto count = partition.count;
 
 	state.in_superset.resize(count, false);
@@ -249,9 +253,15 @@ static void PacTopKSupersetWindowInit(AggregateInputData &aggr_input_data, const
 		return;
 	}
 
-	// Collect counter[J] for every row: (row_idx, value)
-	vector<pair<idx_t, PAC_FLOAT>> values;
-	values.reserve(count);
+	// If K >= count, all groups are in the superset (no filtering needed)
+	if (K >= count) {
+		std::fill(state.in_superset.begin(), state.in_superset.end(), true);
+		return;
+	}
+
+	// Step 1: Collect all 64 counter values for every row.
+	// Flat layout: all_counters[row * 64 + world] = counter value
+	vector<PAC_FLOAT> all_counters(count * 64, PAC_FLOAT(0));
 
 	auto *inputs = partition.inputs;
 	auto counters_col_idx = partition.column_ids[0]; // first argument = counters list
@@ -278,37 +288,57 @@ static void PacTopKSupersetWindowInit(AggregateInputData &aggr_input_data, const
 		for (idx_t i = 0; i < chunk_size; i++) {
 			auto list_idx = list_data.sel->get_index(i);
 
-			if (!list_data.validity.RowIsValid(list_idx)) {
-				// NULL list → treat as 0 for this world
-				values.emplace_back(row_offset, PAC_FLOAT(0));
-				row_offset++;
-				continue;
-			}
-
-			auto &entry = list_entries[list_idx];
-			PAC_FLOAT val = 0;
-			if (J < entry.length) {
-				auto child_idx = child_data.sel->get_index(entry.offset + J);
-				if (child_data.validity.RowIsValid(child_idx)) {
-					val = child_values[child_idx];
+			if (list_data.validity.RowIsValid(list_idx)) {
+				auto &entry = list_entries[list_idx];
+				idx_t num_counters = std::min(entry.length, idx_t(64));
+				for (idx_t j = 0; j < num_counters; j++) {
+					auto child_idx = child_data.sel->get_index(entry.offset + j);
+					if (child_data.validity.RowIsValid(child_idx)) {
+						all_counters[row_offset * 64 + j] = child_values[child_idx];
+					}
 				}
 			}
-			values.emplace_back(row_offset, val);
 			row_offset++;
 		}
 	}
 
-	// Sort descending by counter[J] and mark top-K rows
-	std::sort(values.begin(), values.end(),
-	          [](const pair<idx_t, PAC_FLOAT> &a, const pair<idx_t, PAC_FLOAT> &b) { return a.second > b.second; });
-	idx_t top_k = std::min(K, static_cast<idx_t>(values.size()));
-	for (idx_t i = 0; i < top_k; i++) {
-		state.in_superset[values[i].first] = true;
+	// Step 2: For each world w (0..63), find the top-K groups by counter[w]
+	// and add them to the union superset.
+	vector<pair<idx_t, PAC_FLOAT>> world_values(count);
+
+	for (idx_t w = 0; w < 64; w++) {
+		// Extract (row_idx, counter[w]) for all rows
+		for (idx_t r = 0; r < count; r++) {
+			world_values[r] = {r, all_counters[r * 64 + w]};
+		}
+
+		// Partial sort: nth_element places the K-th element at position K-1,
+		// with all elements before it being the top-K (in unspecified order).
+		if (ascending) {
+			std::nth_element(world_values.begin(), world_values.begin() + static_cast<ptrdiff_t>(K),
+			                 world_values.end(),
+			                 [](const pair<idx_t, PAC_FLOAT> &a, const pair<idx_t, PAC_FLOAT> &b) { return a.second < b.second; });
+		} else {
+			std::nth_element(world_values.begin(), world_values.begin() + static_cast<ptrdiff_t>(K),
+			                 world_values.end(),
+			                 [](const pair<idx_t, PAC_FLOAT> &a, const pair<idx_t, PAC_FLOAT> &b) { return a.second > b.second; });
+		}
+
+		// Mark the top-K rows for this world in the union
+		for (idx_t i = 0; i < K; i++) {
+			state.in_superset[world_values[i].first] = true;
+		}
 	}
 
 #if PAC_DEBUG
-	PAC_DEBUG_PRINT("pac_topk_superset: K=" + std::to_string(K) + " world_idx=" + std::to_string(J) +
-	                " total_groups=" + std::to_string(count) + " selected=" + std::to_string(top_k));
+	idx_t superset_size = 0;
+	for (idx_t i = 0; i < count; i++) {
+		if (state.in_superset[i]) superset_size++;
+	}
+	PAC_DEBUG_PRINT("pac_topk_superset: K=" + std::to_string(K) +
+	                " ascending=" + std::to_string(ascending) +
+	                " total_groups=" + std::to_string(count) +
+	                " superset_size=" + std::to_string(superset_size));
 #endif
 }
 
@@ -758,12 +788,13 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	}
 
 	// ==========================================================================
-	// Step 2: Per-world local top-K ranking via window function.
+	// Step 2: Union-of-all-worlds top-K ranking via window function.
 	//
-	// Per Xiaochen's approach: for each world w (0..63), independently rank
-	// all groups by counter[w] and select the top-K. The union of all 64
-	// per-world top-K sets forms the superset. Only superset members are
-	// noised and considered for the final top-K selection.
+	// For each world w (0..63), independently rank all groups by counter[w]
+	// and select the top-K. The union of all 64 per-world top-K sets forms
+	// the superset. This is privacy-safe because the superset is determined
+	// by ALL worlds (public), not any single secret world. Only superset
+	// members are noised and considered for the final top-K selection.
 	//
 	// Plan structure (both PATH A and PATH B):
 	//   FinalTopN(K, ORDER BY noised DESC)
@@ -776,11 +807,13 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	PAC_DEBUG_PRINT("PACTopKRule: Step 2 - Building per-world ranking pipeline");
 #endif
 
-	// Determine which PAC aggregate the ORDER BY references (for ranking).
-	// Default to the first PAC aggregate.
+	// Determine which PAC aggregate the ORDER BY references (for ranking)
+	// and capture the sort direction for per-world ranking.
 	idx_t ranking_agg_idx = 0;
+	bool ranking_ascending = false; // default to descending (most top-k queries use DESC)
 	for (idx_t oi = 0; oi < ctx.topn->orders.size(); oi++) {
 		if (OrderExprReferencesPacAgg(*ctx.topn->orders[oi].expression, pac_aggs, ctx.intermediate_projections, 0)) {
+			ranking_ascending = (ctx.topn->orders[oi].type == OrderType::ASCENDING);
 			// Find which PAC agg this order references
 			for (idx_t j = 0; j < pac_aggs.size(); j++) {
 				auto *stripped = StripCasts(ctx.topn->orders[oi].expression.get());
@@ -1015,26 +1048,8 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	                                              PacTopKSupersetWindow);
 	aggr_func->window_init = PacTopKSupersetWindowInit;
 
-	// Compute world index J = query_hash % 64, using the same formula as PacBindData
-	// so that the world used for top-K ranking is consistent with the world used
-	// by PacNoisySampleFrom64Counters for noise generation.
-	idx_t world_idx = 0;
-	{
-		uint64_t seed = 42;
-		Value pac_seed_val;
-		if (input.context.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-			seed = static_cast<uint64_t>(pac_seed_val.GetValue<int64_t>());
-		}
-		double mi = GetPacMiFromSetting(input.context);
-		if (mi != 0.0) {
-			seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(input.context.ActiveTransaction().GetActiveQuery());
-		}
-		uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
-		world_idx = query_hash % 64;
-	}
-
 	// Read expansion factor c (default 1.0). The window function selects
-	// ceil(c * K) candidates from world J; the final TopN limits to K.
+	// ceil(c * K) candidates per world for the union; the final TopN limits to K.
 	double expansion = 1.0;
 	Value exp_val;
 	if (input.context.TryGetCurrentSetting("pac_topk_expansion", exp_val) && !exp_val.IsNull()) {
@@ -1045,7 +1060,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	}
 	idx_t expanded_k = static_cast<idx_t>(std::ceil(expansion * static_cast<double>(ctx.topn->limit)));
 
-	auto bind_data = make_uniq<PacTopKSupersetBindData>(expanded_k, world_idx);
+	auto bind_data = make_uniq<PacTopKSupersetBindData>(expanded_k, ranking_ascending);
 	auto window_expr = make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_AGGREGATE, LogicalType::BOOLEAN,
 	                                                    std::move(aggr_func), std::move(bind_data));
 	// Counters list is the sole argument

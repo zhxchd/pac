@@ -1,19 +1,23 @@
 //
 // PAC Top-K Pushdown Rewriter
 //
-// Post-optimization rule that rewrites top-k queries for better utility.
+// Post-optimization rule that rewrites top-k queries for privacy-safe top-k.
 //
 // Problem: In the default plan, PAC noise is applied at the aggregate level (below TopN).
 // This means TopN operates on noisy values, potentially selecting wrong groups.
+// Worse, if we were to pick a single world's top-K keys, the output key set itself
+// would leak which world is the secret, breaking PAC privacy.
 //
-// Solution: When pac_pushdown_topk=true, rewrite the plan using single-world ranking:
+// Solution: When pac_pushdown_topk=true, rewrite the plan using union-of-all-worlds ranking:
 // 1. The aggregate produces raw counter lists (pac_*_counters) instead of noised scalars
-// 2. A custom window function (pac_topk_superset) selects one world J (= query_hash % 64,
-//    consistent with PacNoisySampleFrom64Counters) and marks the top-K groups by counter[J]
-// 3. A filter keeps only those K groups
-// 4. A "noised projection" applies pac_noised() to the selected groups,
-//    then casts back to the original aggregate type (e.g. BIGINT for count)
-// 5. A final TopN re-ranks the K groups by noised values
+// 2. A custom window function (pac_topk_superset) independently finds the top-K groups
+//    in EACH of the 64 worlds and takes the UNION. This superset is determined by all
+//    worlds (public information), not any single secret world, so its composition leaks
+//    nothing about the secret.
+// 3. A filter keeps only superset members
+// 4. A "noised projection" applies pac_noised() to each superset group's 64-counter list,
+//    using standard PAC null handling and variance-calibrated noise
+// 5. A final TopN re-ranks the noised superset members and outputs the top K
 //
 // Plan structure (both PATH A and PATH B):
 //   FinalTopN(K, ORDER BY noised DESC)
@@ -47,7 +51,7 @@ void RegisterPacMeanFunction(ExtensionLoader &loader);
 // Register the pac_unnoised scalar function (extracts counter[J] for debugging)
 void RegisterPacUnnoisedFunction(ExtensionLoader &loader);
 
-// Register the pac_topk_superset window aggregate function (single-world top-K selection)
+// Register the pac_topk_superset window aggregate function (union-of-all-worlds top-K selection)
 void RegisterPacTopKSupersetFunction(ExtensionLoader &loader);
 
 } // namespace duckdb
