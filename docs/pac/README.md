@@ -1,19 +1,19 @@
 # PAC Internals
 
-This document describes the internal implementation of the PAC (Privacy-Aware-Computed) aggregation algorithm.
+This document describes the internal implementation of OUR SIMD-PAC-DB aggregation algorithm.
 
 ## Overview
 
-PAC transforms standard SQL aggregates (SUM, COUNT, AVG, MIN, MAX) into privacy-preserving versions that use **bit-level probabilistic counting**. Instead of traditional sampling where rows are included or excluded, PAC maintains 64 parallel counters and uses hash bits to determine which counters receive each value.
+PAC transforms standard SQL aggregates (SUM, COUNT, AVG, MIN, MAX) into privacy-preserving versions that use **bit-level stochastic counting**. Instead of traditional sampling where rows are included or excluded, PAC aggregation algorithms maintains 64 parallel results ("possible worlds") and uses hash bits to determine which results receive each value.
 
 ## Core Algorithm
 
-### Hash-Based Counter Selection
+### Hash-Based Probabilistic Counting
 
 For each row in the query:
 
-1. **Compute hash**: The privacy unit's key (PAC_KEY, PRIMARY KEY, or rowid) is hashed to produce a 64-bit value
-2. **Distribute to counters**: For each of the 64 counters, if bit `j` of the hash is 1, the value is added to counter `j`
+1. **Compute hash**: The privacy unit's key (PAC_KEY, PRIMARY KEY, or rowid) is hashed to produce a 64-bit value. If there are multiple columns, etheir hashes are XORed. The resulting hash is further transformed by pach_hash(hash), which re-hashes the hash such that each query uses a different hash function.
+2. **Distribute to counters**: Each bit in the hash of a PU key determines whether that entity is or is not part of that possible world. There are 64 possible worlds. Technically, for each of the 64 counters it is imple: if bit `j` of the hash is 1, the value is added to counter `j`
 
 ```cpp
 for (int j = 0; j < 64; j++) {
@@ -23,25 +23,25 @@ for (int j = 0; j < 64; j++) {
 }
 ```
 
-On average, each row contributes to ~32 counters (half the bits are 1).
+Our approach is called SIMD-PAC-DB because these loops are SIMD-friendly. The above loop can be executed in just five AVX512 instructions. This makes DuckDB-pac very efficient, queries are typically just 2x slower than default DuckDB.
 
-### Counter Selection at Finalize
+On average, each row contributes to ~32 counters (half the bits are 1). When the COUNT and SUM functions finalize, they multiply the values in the counters by two: because each counter only receives half the values on average.
 
-The `pac_mi` setting (0-63) determines which counter is used for the final result:
+### pac_noised(counters)
 
-```cpp
-result = counter[pac_mi];
-```
-
-### 2x Multiplier Compensation
-
-Since each counter only receives ~50% of values on average, the result is multiplied by 2:
+A `secret_world` (0-63) is randomly chosen, for each query. This determines which counter is used for the final result:
 
 ```cpp
-result *= 2.0;
+result = counter[secret_world] + PAC_NOISE(counters);
 ```
 
-This compensates for the probabilistic sampling.
+The PAC_NOISE(counters) measures the variance in the counters and uses this to compute noise. This noise computation changes also depending on how many results have been released in the query.
+
+Normally the PAC aggregate functions, like pac_count(), return 64 counters (as a LIST<float>). Then, there is a function pac_noised(LIST<float>):float that returns a single noised value, as descroibed above. 
+
+For performance reasons, we also, provide fused versions, like pac_count_noised(), that are equivalent to pac_noised(pac_count(..)). 
+
+In the general case, aggregates moight be part of complex expressions. For these we use the aggregation functions that return counters (LIST<float>) and then use SQL lambda functions to iterate over the counters and compute the complex expression -- which is fed into pac_noised() to only noise the final expression result once.
 
 ## PAC Aggregate Functions
 
@@ -51,10 +51,10 @@ Transforms `SUM(value)` into `pac_sum(hash_expr, value)`.
 
 **Implementation details:**
 
-- **Cascaded accumulators**: Uses multiple precision levels (8-bit, 16-bit, 32-bit, 64-bit) for efficiency
-- **SWAR optimization**: Uses SIMD-Within-A-Register to pack multiple counters per 64-bit word
-- **Signed value handling**: Can use double-sided mode (separate positive/negative states) or signed mode
-
+- **Cascaded accumulators**: Uses multiple precision levels (8-bit, 16-bit, 32-bit, 64-bit) for efficiency (deprected). We use  SIMD-Within-A-Register (SWAR) to pack multiple counters per 64-bit word. We need to use 64-bits lanes, because the hashes are 64-bits and all values in a computation must have the same width to get compiler auto-vectorization.
+- **Approximate Sums**: We now use 16-bits sums only. In case of overflow, we cascade to a next level that cuts of the lower 4 bits and gets 4 higher bits. This can go on for 25 levels, but typically there is just 1 level or  few (levels are allocated lazily).
+- **Signed value handling**: for negative numbers, we allocate (also lazily) a complete second approximate SUM state, that stores all negative values negated (positive). At aggregation finalization negative (if present) is subtracted from positive total. This method turned out to be much stabler for sums involving both positive and gebative numbers that can cancel each other out.
+- 
 ```sql
 -- Original
 SELECT SUM(amount) FROM orders;
@@ -69,9 +69,8 @@ Transforms `COUNT(*)` or `COUNT(expr)` into `pac_count(hash_expr, 1)`.
 
 **Implementation details:**
 
-- Uses the same cascaded accumulator structure as pac_sum
-- COUNT(*) passes 1 as the value argument
-- COUNT(expr) passes 1 for non-NULL values
+- Uses 64 counters of 8-bits (but stored as 8x 64-bits counters, i.e. SWAR - see pac_sum). After processing 255 values, before this can overflow, all counters are flushed to full 64-bit totals (lazily allocated).
+- Buffering optimiation: do not immediately process new values, but wait until there are 4 values (buffer 3 values first). This delay the allocation of the aggregation state (containing 64 counters) until the first buffer flush. Helps aginst Out Of Memory failures, because in difficult aggregations with very many GROUP BY keys, the first hash-table-phase would find very few or no values with the same key. Duplicates would only be found in the second phase of spilling aggregation, when partitions are re-read and combined. Buffering prevents a full state being allocated for every individual tuple.
 
 ```sql
 -- Original
@@ -81,24 +80,6 @@ SELECT COUNT(*) FROM orders;
 SELECT pac_count(hash(customer_id), 1) FROM orders;
 ```
 
-### pac_avg
-
-Transforms `AVG(value)` into `pac_avg(hash_expr, value)`.
-
-**Implementation details:**
-
-- Internally computes `pac_sum(hash, value) / count`
-- Tracks exact count alongside probabilistic sum
-- Applies 2x compensation after division
-
-```sql
--- Original
-SELECT AVG(amount) FROM orders;
-
--- Transformed
-SELECT pac_avg(hash(customer_id), amount) FROM orders;
-```
-
 ### pac_min / pac_max
 
 Transforms `MIN(value)` and `MAX(value)` into their PAC equivalents.
@@ -106,7 +87,6 @@ Transforms `MIN(value)` and `MAX(value)` into their PAC equivalents.
 **Implementation details:**
 
 - **Bound optimization**: Tracks current min/max bounds to skip unnecessary comparisons
-- **Banked storage**: Uses efficient memory layout for 64 parallel min/max values
 - **Lazy allocation**: Only allocates memory for counters that receive values
 
 ```sql
@@ -117,27 +97,6 @@ SELECT MIN(price), MAX(price) FROM products;
 SELECT pac_min(hash(product_id), price), pac_max(hash(product_id), price) FROM products;
 ```
 
-## Hash Input Generation
-
-The hash input is generated based on the privacy unit's identifier:
-
-### Priority Order
-
-1. **PAC_KEY**: If defined via `CREATE PU TABLE` or `ALTER PU TABLE ADD PAC_KEY`
-2. **PRIMARY KEY**: Database-level primary key constraint
-3. **rowid**: DuckDB's internal row identifier (fallback)
-
-### Composite Keys
-
-For composite keys (multiple columns), values are XOR'd before hashing:
-
-```cpp
-// Single column
-hash_expr = hash(pk_column);
-
-// Composite key
-hash_expr = hash(xor(pk_col1, xor(pk_col2, pk_col3)));
-```
 
 ## Query Transformation
 
@@ -170,40 +129,21 @@ SELECT SUM(amount) FROM orders;
 SELECT pac_sum(hash(customer_id), amount) FROM orders;
 ```
 
-### Join Without PAC_LINK
-
-When a privacy unit is joined with a table that has no PAC_LINK:
-
-```sql
--- Original
-SELECT SUM(s.amount) FROM customers c JOIN sales s ON c.id = s.customer_id;
-
--- Transformation
--- Uses the PU's PAC_KEY for hashing
-SELECT pac_sum(hash(c.id), s.amount) FROM customers c JOIN sales s ON c.id = s.customer_id;
-```
-
-## Configuration Parameters
-
-| Parameter | Effect on Algorithm |
-|-----------|---------------------|
-| `pac_mi` | Selects which counter (0-63) to use for result |
-| `pac_seed` | Seeds the RNG for deterministic noise |
-| `pac_noise` | Enables/disables noise addition |
-| `pac_deterministic_noise` | Uses deterministic (reproducible) noise |
-
 ## Build-Time Optimization Flags
 
-These compile-time flags control algorithm variants:
+These compile-time flags control algorithm variants -- they are basically there for scientific reproducibility so we can quantify the benefits of the optimizations:
 
 | Flag | Effect |
 |------|--------|
-| `PAC_COUNT_NONBANKED` | Disable banked counting optimization |
-| `PAC_SUMAVG_NONCASCADING` | Disable cascaded accumulators |
-| `PAC_SUMAVG_NONLAZY` | Pre-allocate all accumulator levels |
-| `PAC_MINMAX_NONBANKED` | Disable banked min/max |
-| `PAC_MINMAX_NOBOUNDOPT` | Disable bound optimization |
-| `PAC_MINMAX_NONLAZY` | Pre-allocate all min/max levels |
+| `PAC_NOBUFFERING` | disable input buffering (lazy allocation) |
+| `PAC_NOCASCADING` | Pre-allocate all accumulator levels |
+| `PAC_NOSIMD` | nocascading with simd-unfriendly update kernels and auto-vectorization disabled|
+| `PAC_NOBOUNDOPT` | disable bound optimization (only affects min/max) |
+| `PAC_SIGNEDSUM` |  disable handling negative values in signed sums using separate (negated) counters |
+| `PAC_EXACTSUM` | disable approximate sum optimization, use exact cascading (implies signedsum)|
+
+
+
 
 ## Source Code Organization
 
@@ -212,7 +152,4 @@ These compile-time flags control algorithm variants:
 | `src/aggregates/pac_sum.cpp` | pac_sum and pac_avg implementation |
 | `src/aggregates/pac_count.cpp` | pac_count implementation |
 | `src/aggregates/pac_min_max.cpp` | pac_min and pac_max implementation |
-
-| `src/compiler/pac_bitslice_compiler.cpp` | Query transformation logic |
-| `src/query_processing/pac_expression_builder.cpp` | Expression transformation |
 
