@@ -91,36 +91,3 @@ P-tracking is only active when `pac_mi > 0`. When `pac_mi = 0` (deterministic mo
 |---------|-----------|
 | `pac_ptracking = true` | Query-level MIA: adversary cannot infer if a record was used to answer **any cell** of the query |
 | `pac_ptracking = false` | Cell-level MIA: adversary cannot infer if a record was used for a **specific cell** (PAC-DB guarantee) |
-
-## Files modified
-
-- `src/include/aggregates/pac_aggregate.hpp` — `PacPState` struct, `shared_ptr<PacPState>` in `PacBindData`
-- `src/aggregates/pac_aggregate.cpp` — global map, p-weighted noise in `PacNoisySampleFrom64Counters` and `PacAggregateScalar`
-- `src/aggregates/pac_count.cpp` — passes `pstate` to noise function
-- `src/aggregates/pac_sum.cpp` — passes `pstate` to noise function (also covers pac_avg via template)
-- `src/aggregates/pac_min_max.cpp` — passes `pstate` to noise function
-- `src/categorical/pac_categorical.cpp` — `pstate` in `PacCategoricalBindData`, passes to noise function
-- `src/core/pac_extension.cpp` — registers `pac_ptracking` setting
-
-## Reference
-
-Based on the collaborator's Python reference implementation:
-
-```python
-def get_noise_var(p, vals, b):
-    mean = np.sum(vals * p)
-    centered = vals - mean
-    variance = np.sum(centered**2 * p)
-    noise_var = variance / (2 * b)
-    return noise_var
-
-def update_p(p, vals, noisy_result, noise_variance):
-    diff = vals - noisy_result
-    mahalanobis = (diff ** 2) / noise_variance
-    log_likelihoods = -0.5 * mahalanobis
-    log_p = np.log(p + 1e-300) + log_likelihoods
-    c = log_p.max()
-    log_sum = c + np.log(np.sum(np.exp(log_p - c)))
-    p = np.exp(log_p - log_sum)
-    return p
-```

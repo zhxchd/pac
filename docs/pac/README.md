@@ -1,6 +1,6 @@
 # PAC Internals
 
-This document describes the internal implementation of OUR SIMD-PAC-DB aggregation algorithm.
+This document describes the internal implementation of the SIMD-PAC-DB aggregation algorithm.
 
 ## Overview
 
@@ -12,8 +12,8 @@ PAC transforms standard SQL aggregates (SUM, COUNT, AVG, MIN, MAX) into privacy-
 
 For each row in the query:
 
-1. **Compute hash**: The privacy unit's key (PAC_KEY, PRIMARY KEY, or rowid) is hashed to produce a 64-bit value. If there are multiple columns, etheir hashes are XORed. The resulting hash is further transformed by pach_hash(hash), which re-hashes the hash such that each query uses a different hash function.
-2. **Distribute to counters**: Each bit in the hash of a PU key determines whether that entity is or is not part of that possible world. There are 64 possible worlds. Technically, for each of the 64 counters it is imple: if bit `j` of the hash is 1, the value is added to counter `j`
+1. **Compute hash**: The privacy unit's key (PAC_KEY, PRIMARY KEY, or rowid) is hashed to produce a 64-bit value. If there are multiple columns, their hashes are XORed. The resulting hash is further transformed by pac_hash(hash), which re-hashes the hash such that each query uses a different hash function.
+2. **Distribute to counters**: Each bit in the hash of a PU key determines whether that entity is or is not part of that possible world. There are 64 possible worlds. Technically, for each of the 64 counters it is simple: if bit `j` of the hash is 1, the value is added to counter `j`
 
 ```cpp
 for (int j = 0; j < 64; j++) {
@@ -37,11 +37,11 @@ result = counter[secret_world] + PAC_NOISE(counters);
 
 The PAC_NOISE(counters) measures the variance in the counters and uses this to compute noise. This noise computation changes also depending on how many results have been released in the query.
 
-Normally the PAC aggregate functions, like pac_count(), return 64 counters (as a LIST<float>). Then, there is a function pac_noised(LIST<float>):float that returns a single noised value, as descroibed above. 
+Normally the PAC aggregate functions, like pac_count(), return 64 counters (as a LIST<float>). Then, there is a function pac_noised(LIST<float>):float that returns a single noised value, as described above. 
 
 For performance reasons, we also, provide fused versions, like pac_count_noised(), that are equivalent to pac_noised(pac_count(..)). 
 
-In the general case, aggregates moight be part of complex expressions. For these we use the aggregation functions that return counters (LIST<float>) and then use SQL lambda functions to iterate over the counters and compute the complex expression -- which is fed into pac_noised() to only noise the final expression result once.
+In the general case, aggregates might be part of complex expressions. For these we use the aggregation functions that return counters (LIST<float>) and then use SQL lambda functions to iterate over the counters and compute the complex expression -- which is fed into pac_noised() to only noise the final expression result once.
 
 ## PAC Aggregate Functions
 
@@ -51,10 +51,10 @@ Transforms `SUM(value)` into `pac_sum(hash_expr, value)`.
 
 **Implementation details:**
 
-- **Cascaded accumulators**: Uses multiple precision levels (8-bit, 16-bit, 32-bit, 64-bit) for efficiency (deprected). We use  SIMD-Within-A-Register (SWAR) to pack multiple counters per 64-bit word. We need to use 64-bits lanes, because the hashes are 64-bits and all values in a computation must have the same width to get compiler auto-vectorization.
-- **Approximate Sums**: We now use 16-bits sums only. In case of overflow, we cascade to a next level that cuts of the lower 4 bits and gets 4 higher bits. This can go on for 25 levels, but typically there is just 1 level or  few (levels are allocated lazily).
-- **Signed value handling**: for negative numbers, we allocate (also lazily) a complete second approximate SUM state, that stores all negative values negated (positive). At aggregation finalization negative (if present) is subtracted from positive total. This method turned out to be much stabler for sums involving both positive and gebative numbers that can cancel each other out.
-- 
+- **SWAR (SIMD Within A Register)**: Packs multiple counters per 64-bit word. We use 64-bit lanes because the hashes are 64-bit and all values in a computation must have the same width to get compiler auto-vectorization.
+- **Approximate Sums**: Uses 16-bit sums only. In case of overflow, cascades to a next level that cuts off the lower 4 bits and gets 4 higher bits. This can go on for 25 levels, but typically there is just 1 level or few (levels are allocated lazily).
+- **Signed value handling**: for negative numbers, we allocate (also lazily) a complete second approximate SUM state, that stores all negative values negated (positive). At aggregation finalization negative (if present) is subtracted from positive total. This method turned out to be much stabler for sums involving both positive and negative numbers that can cancel each other out.
+
 ```sql
 -- Original
 SELECT SUM(amount) FROM orders;
@@ -70,7 +70,7 @@ Transforms `COUNT(*)` or `COUNT(expr)` into `pac_count(hash_expr, 1)`.
 **Implementation details:**
 
 - Uses 64 counters of 8-bits (but stored as 8x 64-bits counters, i.e. SWAR - see pac_sum). After processing 255 values, before this can overflow, all counters are flushed to full 64-bit totals (lazily allocated).
-- Buffering optimiation: do not immediately process new values, but wait until there are 4 values (buffer 3 values first). This delay the allocation of the aggregation state (containing 64 counters) until the first buffer flush. Helps aginst Out Of Memory failures, because in difficult aggregations with very many GROUP BY keys, the first hash-table-phase would find very few or no values with the same key. Duplicates would only be found in the second phase of spilling aggregation, when partitions are re-read and combined. Buffering prevents a full state being allocated for every individual tuple.
+- Buffering optimization: do not immediately process new values, but wait until there are 4 values (buffer 3 values first). This delay the allocation of the aggregation state (containing 64 counters) until the first buffer flush. Helps against Out Of Memory failures, because in difficult aggregations with very many GROUP BY keys, the first hash-table-phase would find very few or no values with the same key. Duplicates would only be found in the second phase of spilling aggregation, when partitions are re-read and combined. Buffering prevents a full state being allocated for every individual tuple.
 
 ```sql
 -- Original
