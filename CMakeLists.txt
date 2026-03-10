@@ -73,8 +73,12 @@ set(PAC_LINK_LIBS
     ${EXTENSION_NAME}
     core_functions_extension
     parquet_extension
-    jemalloc_extension
     duckdb_static)
+
+# jemalloc is only built on Linux 64-bit; conditionally link it when available
+if(TARGET jemalloc_extension)
+    list(APPEND PAC_LINK_LIBS jemalloc_extension)
+endif()
 
 if(NOT EMSCRIPTEN AND NOT WIN32)
     # Build a single unified test executable that invokes all tests via src/test/test_runner.cpp

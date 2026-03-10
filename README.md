@@ -121,8 +121,7 @@ PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUN
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `pac_enabled` | `true` | Enable/disable PAC |
-| `pac_mi` | `0.0` | Privacy parameter (higher = more noise) |
+| `pac_mi` | `1/128` | Mutual information bound (higher = less noise) |
 | `pac_seed` | random | Fix seed for reproducible results |
 | `pac_noise` | `true` | Toggle noise injection |
 | `pac_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |

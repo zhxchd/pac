@@ -125,7 +125,7 @@ The compiler uses `PAC_LINK`s to:
 
 ## Metadata Persistence
 
-PAC metadata is stored in a JSON file named `pac_metadata_<db_name>.json` alongside the database file. For in-memory databases, no file is saved.
+PAC metadata is stored in a JSON file named `pac_metadata_<db_name>_<schema_name>.json` alongside the database file. For in-memory databases, no file is saved.
 
 The file is written after every PAC DDL operation (`CREATE`, `ALTER`, `DROP`). On database load, the PAC extension reads the metadata file and populates the in-memory `PACMetadataManager`.
 
