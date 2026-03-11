@@ -1,6 +1,6 @@
 # PAC — Automatic Query Privatization for DuckDB
 
-A DuckDB extension that automatically privatizes SQL queries using the PAC Privacy framework. PAC protects against Membership Inference Attacks by adding noise to aggregate query results. Unlike Differential Privacy, PAC works automatically — no per-query analysis by a privacy specialist is needed.
+PAC is a DuckDB extension that automatically privatizes SQL queries using the PAC Privacy framework, protecting against Membership Inference Attacks by adding noise to aggregate query results. Unlike Differential Privacy, PAC works automatically and transparently — no per-query analysis by a privacy specialist is needed.
 
 ## Build
 
@@ -15,6 +15,7 @@ GEN=ninja make
 ```sql
 -- Load the extension
 LOAD 'build/release/extension/pac/pac.duckdb_extension';
+SET pac_seed = 5;
 
 -- Create a privacy unit table: employees are the entities we protect
 CREATE PU TABLE employees (
@@ -26,28 +27,37 @@ CREATE PU TABLE employees (
 );
 
 INSERT INTO employees VALUES
-    (1, 'Engineering', 95000),
-    (2, 'Engineering', 110000),
-    (3, 'Sales', 80000),
-    (4, 'Sales', 72000),
-    (5, 'Marketing', 85000);
+    (1, 'Engineering', 95000),  (2, 'Engineering', 110000),
+    (3, 'Engineering', 105000), (4, 'Engineering', 98000),
+    (5, 'Sales', 80000),        (6, 'Sales', 72000),
+    (7, 'Sales', 78000),        (8, 'Sales', 85000),
+    (9, 'Marketing', 85000),    (10, 'Marketing', 90000),
+    (11, 'Marketing', 82000),   (12, 'Marketing', 88000);
 
 -- This works: non-protected columns can be freely queried
 SELECT department FROM employees;
 
 -- This is blocked: protected columns cannot be projected
 SELECT salary FROM employees;
--- Error: protected column 'employees.salary' can only be accessed inside aggregate functions
+-- Error: protected column 'employees.salary' can only be accessed inside
+-- aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
 -- This works: aggregate queries on protected columns get automatic noise
-SELECT department, AVG(salary), COUNT(*)
+SELECT department, AVG(salary)::INTEGER AS avg_salary, COUNT(*) AS count
 FROM employees
 GROUP BY department;
+┌─────────────┬────────────┬───────┐
+│ department  │ avg_salary │ count │
+├─────────────┼────────────┼───────┤
+│ Engineering │     102000 │     2 │
+│ Marketing   │      86250 │     3 │
+│ Sales       │      78333 │     1 │
+└─────────────┴────────────┴───────┘
 ```
 
-The noised result looks like the real answer, but is slightly perturbed to prevent an attacker from determining whether any specific employee is in the database.
+The noised result is close to the real answer but perturbed — an attacker cannot determine whether any specific employee is in the database. The true averages are 78750, 86250, and 102000; the counts are off because PAC's sub-sampling noise dominates on small tables.
 
-## Multi-Table Example: Customer Orders
+## Multi-Table Example: Protecting Customer Orders
 
 PAC propagates privacy through join chains via `PAC_LINK`:
 
@@ -78,13 +88,18 @@ CREATE TABLE lineitem (
 
 -- PAC automatically follows the chain: lineitem -> orders -> customers
 SELECT SUM(price) FROM lineitem;
+┌───────────────┐
+│  sum(price)   │
+├───────────────┤
+│       1388.79 │
+└───────────────┘
 ```
 
 ## How It Works
 
-1. You declare which table is the **privacy unit** (`CREATE PU TABLE` or `ALTER TABLE SET PU`) and which columns to protect
-2. You link related tables with `PAC_LINK` to propagate privacy through joins
-3. PAC intercepts every aggregate query, hashes each privacy unit's key into a 64-bit value, and uses the bits to create 64 sub-samples. Each aggregate runs on all sub-samples independently, and the final result is the noised median — close to the true answer but safe against membership inference
+1. You declare which table is the **privacy unit** (`CREATE PU TABLE` or `ALTER TABLE SET PU`) and which columns to protect.
+2. You link related tables with `PAC_LINK` to propagate privacy through joins.
+3. PAC intercepts every aggregate query, hashes each privacy unit's key into a 64-bit value, and uses the bits to create 64 sub-samples. Each aggregate runs on all sub-samples independently, and the final result is the noised median — close to the true answer but safe against membership inference.
 
 ### Mutual Information (MI)
 
@@ -129,7 +144,7 @@ PAC rewrites standard aggregates: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUN
 ## Documentation
 
 For implementation details, see the [docs/](docs/) folder:
-[Algorithm](docs/pac/README.md) | [Parser](docs/pac/pac_parser.md) | [Query Operators](docs/pac/query_operators.md) | [PAC Functions](docs/pac/pac_functions.md) | [Runtime Checks](docs/pac/runtime_checks.md) | [Tests](docs/test/README.md) | [Benchmarks](docs/benchmark/README.md)
+[Algorithm](docs/pac/README.md) | [Parser](docs/pac/syntax.md) | [Query Operators](docs/pac/query_operators.md) | [PAC Functions](docs/pac/functions.md) | [Runtime Checks](docs/pac/runtime_checks.md) | [Tests](docs/test/README.md) | [Benchmarks](docs/benchmark/README.md)
 
 ## Literature
 
