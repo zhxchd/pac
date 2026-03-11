@@ -697,7 +697,7 @@ static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &s
 		to_process.pop();
 
 		// Get foreign keys from this table
-		auto fks = FindForeignKeys(context, current);
+		auto fks = FindPacLinks(context, current);
 		for (auto &fk : fks) {
 			string referenced_table = fk.first;
 
@@ -828,7 +828,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			to_check.pop();
 
 			// Get outgoing PAC_LINKs
-			auto fks = FindForeignKeys(context, current);
+			auto fks = FindPacLinks(context, current);
 			for (auto &fk : fks) {
 				string ref_table = fk.first;
 				if (visited.find(ref_table) != visited.end()) {
@@ -871,13 +871,13 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	for (auto &name : scanned_tables) {
 		ColumnMetadata md;
 		md.table_name = name;
-		md.pks = FindPrimaryKey(context, name);
-		md.fks = FindForeignKeys(context, name);
+		md.pks = FindPacKey(context, name);
+		md.fks = FindPacLinks(context, name);
 		result.table_metadata[name] = std::move(md);
 	}
 
 	// Compute PAC_LINK paths from scanned tables to any privacy unit (transitive)
-	auto fk_paths = FindForeignKeyBetween(context, all_privacy_units, scanned_tables);
+	auto fk_paths = FindPacLinkPath(context, all_privacy_units, scanned_tables);
 
 	// Populate metadata for tables in FK paths that aren't scanned
 	for (auto &kv : fk_paths) {
@@ -885,8 +885,8 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			if (result.table_metadata.find(tbl) == result.table_metadata.end()) {
 				ColumnMetadata md;
 				md.table_name = tbl;
-				md.pks = FindPrimaryKey(context, tbl);
-				md.fks = FindForeignKeys(context, tbl);
+				md.pks = FindPacKey(context, tbl);
+				md.fks = FindPacLinks(context, tbl);
 				result.table_metadata[tbl] = std::move(md);
 			}
 		}
@@ -897,11 +897,11 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		if (result.table_metadata.find(t) == result.table_metadata.end()) {
 			ColumnMetadata md;
 			md.table_name = t;
-			md.pks = FindPrimaryKey(context, t);
-			md.fks = FindForeignKeys(context, t);
+			md.pks = FindPacKey(context, t);
+			md.fks = FindPacLinks(context, t);
 			result.table_metadata[t] = std::move(md);
 		} else if (result.table_metadata[t].pks.empty()) {
-			auto pk = FindPrimaryKey(context, t);
+			auto pk = FindPacKey(context, t);
 			if (!pk.empty()) {
 				result.table_metadata[t].pks = pk;
 			}

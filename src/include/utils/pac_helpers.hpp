@@ -36,11 +36,11 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 
 // Find PAC_KEY column names for the given table. Only uses PAC metadata.
 // Returns a vector with the PAC_KEY column names in order; empty vector if no PAC_KEY is defined.
-vector<string> FindPrimaryKey(ClientContext &context, const string &table_name);
+vector<string> FindPacKey(ClientContext &context, const string &table_name);
 
 // Find PAC_LINK relationships declared on the given table. Only uses PAC metadata.
 // Returns a vector of pairs: (referenced_table_name, local_column_names) for each PAC_LINK.
-vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name);
+vector<std::pair<string, vector<string>>> FindPacLinks(ClientContext &context, const string &table_name);
 
 // Find the referenced columns on the parent table for a specific PAC_LINK relationship.
 // E.g., for PAC_LINK (l_orderkey) REFERENCES orders(o_orderkey), calling
@@ -50,8 +50,8 @@ vector<string> FindReferencedPKColumns(ClientContext &context, const string &tab
 // Find PAC_LINK path(s) from any of `table_names` to any of `privacy_units`.
 // Returns a map: start_table (as provided) -> path (vector of table names from start to privacy unit,
 // inclusive). If no path exists for a start table, it will not appear in the returned map.
-std::unordered_map<string, vector<string>>
-FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_units, const vector<string> &table_names);
+std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &context, const vector<string> &privacy_units,
+                                                           const vector<string> &table_names);
 
 // -----------------------------------------------------------------------------
 // PAC-specific small helpers
