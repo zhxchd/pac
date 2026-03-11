@@ -55,24 +55,6 @@ This corresponds to `update_p(p, vals, noisy_result, noise_variance)` in the ref
 
 As more cells are released, `p` concentrates around the true secret world. The p-weighted variance shrinks, causing the noise variance formula to produce **larger** noise to compensate — exactly what's needed for correct composition.
 
-## Implementation details
-
-### Cross-aggregate sharing
-
-The `p` vector is shared across all aggregate functions (pac_count, pac_sum, pac_avg, pac_min, pac_max, pac_aggregate) within the same query via a global map keyed by `query_hash`. This ensures that if a query computes both `pac_count` and `pac_sum`, the information leaked by count cells is accounted for when calibrating sum cells, and vice versa.
-
-### Concurrency
-
-A mutex protects the shared `p` state. Each noise operation locks, reads `p`, computes weighted variance, adds noise, updates `p`, and unlocks. This serialization is inherent to the approach — the collaborator noted "the noising step will have to be done sequentially."
-
-### Handling NULL counters
-
-When a group has fewer than 64 valid counters (some bit positions have no data), the `p` values for non-null worlds are extracted and renormalized to sum to 1 before computing weighted variance and doing the Bayesian update. The null worlds' `p` values are preserved unchanged.
-
-### Lifetime management
-
-The global map stores `weak_ptr` references. Each `PacBindData` instance holds a `shared_ptr` to the `PacPState`. When all `PacBindData` instances for a query are destroyed (query finishes), the `PacPState` is automatically freed and the expired `weak_ptr` is cleaned up lazily.
-
 ## Configuration
 
 ```sql

@@ -1,6 +1,4 @@
-# PAC Parser
-
-The PAC parser is a DuckDB parser extension that intercepts SQL statements to handle PAC-specific DDL syntax. It validates metadata, stores it in the `PACMetadataManager`, and strips PAC clauses before passing the cleaned SQL to DuckDB's standard parser.
+# PAC SQL Syntax
 
 ## DDL Statements
 
@@ -18,21 +16,21 @@ CREATE PU TABLE customer (
 );
 ```
 
-**Clauses**:
-- `PU` keyword after `CREATE`: marks the table as a privacy unit (`is_privacy_unit = true`).
-- `PAC_KEY (col1, col2, ...)`: identifies the PU (composite keys supported). Metadata-only, no constraint enforcement overhead.
-- `PROTECTED (col1, col2, ...)`: columns containing sensitive data that require aggregation. By default, ALL columns of a PU table are considered protected. The `PROTECTED` clause overrides this to list specific columns.
-- `PAC_LINK (local_col) REFERENCES table(ref_col)`: join relationship for privacy propagation (see below).
+**Clauses:**
+- `PU` keyword after `CREATE` marks the table as a privacy unit.
+- `PAC_KEY (col1, col2, ...)` identifies the privacy unit. Composite keys are supported. Metadata-only — no constraint enforcement overhead.
+- `PROTECTED (col1, col2, ...)` lists columns that require aggregation. If omitted, all columns of a PU table are considered protected.
+- `PAC_LINK (local_col) REFERENCES table(ref_col)` declares a join relationship for privacy propagation (see below).
 
-**Validation**:
-- `CREATE PU TABLE` requires `PAC_KEY`
-- PAC tables cannot link to other PAC tables (no cycles)
+**Validation:**
+- `CREATE PU TABLE` requires `PAC_KEY`.
+- PU tables cannot link to other PU tables.
 
 Metadata is saved to a JSON file alongside the database.
 
-### `CREATE TABLE` (with PAC clauses)
+### `CREATE TABLE` with PAC Clauses
 
-Non-PU tables can declare `PAC_LINK`s and `PROTECTED` columns at creation time:
+Non-PU tables can declare `PAC_LINK` and `PROTECTED` columns at creation time:
 
 ```sql
 CREATE TABLE orders (
@@ -44,98 +42,59 @@ CREATE TABLE orders (
 );
 ```
 
-### `ALTER [PU] TABLE ADD`
+### `ALTER [PU] TABLE`
 
-Adds PAC metadata to existing tables. Metadata-only operation (no DDL executed).
-
-Use `ALTER PU TABLE` for privacy unit tables and `ALTER TABLE` for non-PU tables — the keyword must match the table's PU status.
+Adds or removes PAC metadata on existing tables. Metadata-only — no DDL is executed. Use `ALTER PU TABLE` for privacy unit tables and `ALTER TABLE` for non-PU tables.
 
 ```sql
--- On a PU table (created with CREATE PU TABLE or after SET PU)
+-- Add metadata to a PU table.
 ALTER PU TABLE customer ADD PROTECTED (c_name, c_address);
 
--- On a non-PU table
+-- Add metadata to a non-PU table.
 ALTER TABLE orders ADD PAC_LINK (o_custkey) REFERENCES customer(c_custkey);
-ALTER TABLE orders ADD PROTECTED (o_totalprice, o_comment);
+ALTER TABLE orders ADD PROTECTED (o_totalprice);
 
--- PAC_KEY on a non-PU table (preparation for SET PU)
+-- Convert a table to PU.
 ALTER TABLE t ADD PAC_KEY (id);
-ALTER TABLE t SET PU;   -- now t is a PU
-```
+ALTER TABLE t SET PU;
 
-**Validation**:
-- All columns must exist in the table
-- `ALTER PU TABLE` on a non-PU table throws an error (and vice versa)
-- `PROTECTED` columns can't be added twice (throws error, not idempotent)
-- `PAC_LINK`s can't conflict (same local columns to different targets)
-- Exact duplicate links are silently skipped (idempotent)
-- PAC tables cannot link to other PAC tables
+-- Remove PU status.
+ALTER TABLE t UNSET PU;
 
-### `ALTER [PU] TABLE DROP`
-
-Removes PAC metadata. Metadata-only operation. Use `ALTER PU TABLE` for PU tables, `ALTER TABLE` for non-PU tables.
-
-```sql
+-- Remove metadata.
 ALTER TABLE orders DROP PAC_LINK (o_custkey);
 ALTER TABLE orders DROP PROTECTED (o_totalprice);
 ```
 
-**Validation**:
-- Table must have existing PAC metadata
-- The specified link/column must exist in metadata
-
-### `ALTER TABLE SET/UNSET PU`
-
-Toggle privacy unit status on an existing table. `SET PU` requires a `PAC_KEY` to be defined first:
-
-```sql
-ALTER PU TABLE customer ADD PAC_KEY (c_custkey);
-ALTER TABLE customer SET PU;    -- marks as privacy unit
-ALTER TABLE customer UNSET PU;  -- removes privacy unit status
-```
+**Validation:**
+- All referenced columns must exist in the table.
+- `ALTER PU TABLE` on a non-PU table (and vice versa) throws an error.
+- Duplicate `PROTECTED` columns throw an error.
+- Conflicting `PAC_LINK` declarations (same local columns to different targets) throw an error. Exact duplicates are silently skipped.
+- PU tables cannot link to other PU tables.
+- `SET PU` requires a `PAC_KEY` to be defined first.
+- `DROP` requires the specified link or column to exist in metadata.
 
 ### `DROP TABLE`
 
-When a table with PAC metadata is dropped, the `PACDropTableRule` optimizer extension:
-1. Removes the table's metadata from `PACMetadataManager`
-2. Removes `PAC_LINK`s from other tables that reference the dropped table
-3. Saves updated metadata to the JSON file
-
-## `PAC_LINK`
-
-`PAC_LINK`s define join relationships for privacy propagation. Unlike database-enforced FKs:
-- **Metadata-only**: no constraint checking overhead at insert/update time
-- **Composite keys supported**: `PAC_LINK (col1, col2) REFERENCES table(ref1, ref2)`
-- **Must be acyclic**: PAC tables cannot link to other PAC tables
-
-All local and referenced columns named in a `PAC_LINK` declaration are automatically considered `PROTECTED`.
-
-The compiler uses `PAC_LINK`s to:
-1. Determine the `PAC_LINK` path from queried tables to the PU
-2. Decide which tables to join for hash computation
-3. Validate that joins in the query use exact `PAC_LINK` columns
+When a table with PAC metadata is dropped, the `PACDropTableRule` optimizer extension removes the table's metadata, removes `PAC_LINK`s from other tables that reference it, and saves the updated metadata.
 
 ## `PAC_KEY` and `PAC_LINK`
 
-`PAC_KEY` and `PAC_LINK` are the **only** mechanisms for identifying privacy units and join chains. Database-level `PRIMARY KEY` and `FOREIGN KEY` constraints are ignored by the PAC compiler — they have no effect on privacy propagation.
+`PAC_KEY` and `PAC_LINK` are the only mechanisms for identifying privacy units and join chains. Database-level `PRIMARY KEY` and `FOREIGN KEY` constraints are ignored by the PAC compiler.
 
-- `PAC_KEY` identifies the privacy unit columns (metadata-only, no constraint enforcement)
-- `PAC_LINK` defines join paths between tables (metadata-only, no referential integrity checks)
-- `ALTER TABLE SET PU` requires a `PAC_KEY` to be defined first (no rowid fallback)
+- `PAC_KEY` identifies the privacy unit columns. Metadata-only, no constraint enforcement.
+- `PAC_LINK` defines join paths between tables. Metadata-only, no referential integrity checks. Composite keys are supported. All columns named in a `PAC_LINK` declaration are automatically considered `PROTECTED`.
+- The compiler uses `PAC_LINK`s to determine the path from queried tables to the PU, decide which tables to join for hash computation, and validate that query joins use the declared `PAC_LINK` columns.
 
 ## Metadata Persistence
 
-PAC metadata is stored in a JSON file named `pac_metadata_<db_name>_<schema_name>.json` alongside the database file. For in-memory databases, no file is saved.
+PAC metadata is stored in a JSON file named `pac_metadata_<db_name>_<schema_name>.json` alongside the database file. For in-memory databases, no file is saved. The file is written after every PAC DDL operation. On database load, the extension reads the file and populates the in-memory `PACMetadataManager`.
 
-The file is written after every PAC DDL operation (`CREATE`, `ALTER`, `DROP`). On database load, the PAC extension reads the metadata file and populates the in-memory `PACMetadataManager`.
+## Query Validation
 
-## Query Validation Flow
+When a `SELECT` query arrives, the `PACRewriteRule` optimizer checks if the plan scans any PAC-metadata tables, follows `PAC_LINK` paths to find reachable PUs, and classifies the query as:
 
-When a `SELECT` query arrives (not handled by the parser extension), the `PACRewriteRule` optimizer:
-
-1. Checks if the plan scans any PAC-metadata tables
-2. Follows `PAC_LINK` paths to find reachable PUs
-3. Classifies the query:
-   - **Inconspicuous**: no PU or PAC-linked table referenced -> pass through
-   - **Rejected**: references protected data but violates constraints (see `query_operators.md`)
-   - **Rewritable**: valid for PAC compilation -> transform aggregates
+- **Inconspicuous:** no PU or PAC-linked table referenced — passed through unchanged.
+- **Rejected:** references protected data but violates constraints (see `query_operators.md`).
+- **Rewritable:** valid for PAC compilation — aggregates are transformed.

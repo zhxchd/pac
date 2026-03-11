@@ -134,31 +134,6 @@ SET pac_diffcols = NULL;
 -- 0.8,1.0
 ```
 
-## Implementation Details
-
-### Plan-Level Rewrite
-
-The utility diff is implemented as an optimizer rewrite that:
-
-1. Deep-copies the original logical plan before PAC compilation
-2. Compiles the PAC version normally
-3. Wraps both plans in a FULL OUTER JOIN
-4. Adds a diff projection that computes relative error
-5. Adds a streaming summary operator that accumulates metrics
-
-### Numeric Type Handling
-
-Relative error is computed only for numeric columns:
-- `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `HUGEINT`
-- `UTINYINT`, `USMALLINT`, `UINTEGER`, `UBIGINT`
-- `FLOAT`, `DOUBLE`, `DECIMAL`
-
-Non-numeric measure columns pass through unchanged.
-
-### Row Number Fallback
-
-When `pac_diffcols = '0'` (no key columns), PAC adds `ROW_NUMBER() OVER ()` to both sides for positional matching. This is useful for ungrouped aggregate queries.
-
 ## Best Practices
 
 1. **Use deterministic settings for reproducible results:**
