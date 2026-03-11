@@ -107,6 +107,63 @@ namespace duckdb {
  * If FK table is inaccessible, we add a fresh join to bring it into scope.
  */
 
+// Find the first aggregate in a subtree, collecting the path of operators traversed.
+// Stops at DELIM_JOIN/DEPENDENT_JOIN boundaries (correlated subquery boundaries).
+static LogicalAggregate *FindFirstChildAggregateBounded(LogicalOperator *op, vector<LogicalOperator *> &path) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return &op->Cast<LogicalAggregate>();
+	}
+	// Don't traverse into DELIM_JOIN/DEPENDENT_JOIN (correlated subquery boundaries)
+	if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+	    op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+		return nullptr;
+	}
+	path.push_back(op);
+	for (auto &c : op->children) {
+		if (auto *found = FindFirstChildAggregateBounded(c.get(), path)) {
+			return found;
+		}
+	}
+	path.pop_back();
+	return nullptr;
+}
+
+// Check if two tables share a join subtree (connected by a JOIN, not a CROSS_PRODUCT).
+// Walks from the root to find the smallest common ancestor containing both table indices.
+static bool TablesShareJoinSubtree(LogicalOperator *op, idx_t table_idx_a, idx_t table_idx_b) {
+	if (!op) {
+		return false;
+	}
+
+	bool has_a = HasTableIndexInSubtree(op, table_idx_a);
+	bool has_b = HasTableIndexInSubtree(op, table_idx_b);
+
+	if (has_a && has_b) {
+		// Both tables are in this subtree - check if they're in the SAME child
+		for (auto &child : op->children) {
+			bool child_has_a = HasTableIndexInSubtree(child.get(), table_idx_a);
+			bool child_has_b = HasTableIndexInSubtree(child.get(), table_idx_b);
+
+			if (child_has_a && child_has_b) {
+				// Both in same child - recurse to find tighter common ancestor
+				return TablesShareJoinSubtree(child.get(), table_idx_a, table_idx_b);
+			}
+		}
+		// Tables are in different children of this operator
+		// Check if this is a JOIN that connects them (valid) vs CROSS_PRODUCT (separate branches)
+		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+		    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+		    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+			return true;
+		}
+		return false;
+	}
+	return false;
+}
+
 // Check if a table scan is directly reachable from an operator without crossing an aggregate boundary.
 // Returns false if the table is behind a nested aggregate (e.g., Q13 pattern).
 static bool IsDirectlyReachable(LogicalOperator *from, idx_t table_index, bool is_start = true) {
@@ -560,48 +617,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 						// Check if this FK table is in the same subtree as the connecting table
 						// by finding a common ancestor that has both table indices in its subtree
-						// The simplest check: find an operator that has BOTH table indices in its subtree
-						bool shares_subtree = false;
-
-						// Walk up from plan root and find smallest subtree containing both tables
-						std::function<bool(LogicalOperator *)> findCommonSubtree = [&](LogicalOperator *op) -> bool {
-							if (!op) {
-								return false;
-							}
-
-							bool has_connecting = HasTableIndexInSubtree(op, connecting_table_idx);
-							bool has_fk = HasTableIndexInSubtree(op, fk_table_idx);
-
-							if (has_connecting && has_fk) {
-								// Both tables are in this subtree - check if they're in the SAME child
-								// (not in different branches of a join/cross product)
-								for (auto &child : op->children) {
-									bool child_has_connecting =
-									    HasTableIndexInSubtree(child.get(), connecting_table_idx);
-									bool child_has_fk = HasTableIndexInSubtree(child.get(), fk_table_idx);
-
-									if (child_has_connecting && child_has_fk) {
-										// Both in same child - recurse to find tighter common ancestor
-										return findCommonSubtree(child.get());
-									}
-								}
-								// Tables are in different children of this operator
-								// Check if this is a JOIN that connects them (valid) vs CROSS_PRODUCT (separate
-								// branches)
-								if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-								    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
-								    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
-									// Join connects them - they can reference each other
-									shares_subtree = true;
-									return true;
-								}
-								// CROSS_PRODUCT or other - tables are in independent branches
-								return false;
-							}
-							return false;
-						};
-
-						findCommonSubtree(plan.get());
+						bool shares_subtree = TablesShareJoinSubtree(plan.get(), connecting_table_idx, fk_table_idx);
 
 						// Also verify the FK table's columns are accessible (not blocked by MARK/SEMI/ANTI)
 						if (shares_subtree && AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
@@ -1009,32 +1025,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				LogicalAggregate *inner_agg = nullptr;
 				vector<LogicalOperator *> path_to_inner;
 
-				std::function<LogicalAggregate *(LogicalOperator *, vector<LogicalOperator *> &)> find_inner_agg =
-				    [&](LogicalOperator *op, vector<LogicalOperator *> &path) -> LogicalAggregate * {
-					if (!op) {
-						return nullptr;
-					}
-					if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-						return &op->Cast<LogicalAggregate>();
-					}
-					// Don't traverse into DELIM_JOIN/DEPENDENT_JOIN (correlated subquery boundaries)
-					if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
-					    op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
-						return nullptr;
-					}
-					path.push_back(op);
-					for (auto &c : op->children) {
-						if (auto *found = find_inner_agg(c.get(), path)) {
-							return found;
-						}
-					}
-					path.pop_back();
-					return nullptr;
-				};
-
 				for (auto &child : target_agg->children) {
 					path_to_inner.clear();
-					inner_agg = find_inner_agg(child.get(), path_to_inner);
+					inner_agg = FindFirstChildAggregateBounded(child.get(), path_to_inner);
 					if (inner_agg) {
 						break;
 					}

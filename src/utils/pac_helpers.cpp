@@ -585,25 +585,26 @@ bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool 
 	return default_value;
 }
 
+// Collect a map from table_index to the operator that produces it.
+static void CollectOperatorsByTableIndex(LogicalOperator &op,
+                                         std::unordered_map<idx_t, LogicalOperator *> &table_index_to_op) {
+	auto bindings = op.GetColumnBindings();
+	if (!bindings.empty()) {
+		idx_t op_table_index = bindings[0].table_index;
+		table_index_to_op[op_table_index] = &op;
+	}
+	for (auto &child : op.children) {
+		if (child) {
+			CollectOperatorsByTableIndex(*child, table_index_to_op);
+		}
+	}
+}
+
 // Helper to trace a binding back through the plan to find which LogicalGet it originates from
 static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &binding) {
 	// Build a map from table_index to the operator that produces it
 	std::unordered_map<idx_t, LogicalOperator *> table_index_to_op;
-
-	std::function<void(LogicalOperator &)> collect_ops = [&](LogicalOperator &op) {
-		auto bindings = op.GetColumnBindings();
-		if (!bindings.empty()) {
-			// Map this operator's table_index to the operator itself
-			idx_t op_table_index = bindings[0].table_index;
-			table_index_to_op[op_table_index] = &op;
-		}
-		for (auto &child : op.children) {
-			if (child) {
-				collect_ops(*child);
-			}
-		}
-	};
-	collect_ops(plan);
+	CollectOperatorsByTableIndex(plan, table_index_to_op);
 
 	// Start from the binding's table_index and trace backwards
 	idx_t current_table_index = binding.table_index;
@@ -810,24 +811,25 @@ bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const
 	return false;
 }
 
+// Recursively remap BoundColumnRefExpression bindings in an expression tree.
+static void RemapBindingsInExpr(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
+	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = e.Cast<BoundColumnRefExpression>();
+		auto it = map.find(col_ref.binding.table_index);
+		if (it != map.end()) {
+			col_ref.binding.table_index = it->second;
+		}
+	}
+	ExpressionIterator::EnumerateChildren(e, [&map](Expression &child) { RemapBindingsInExpr(child, map); });
+}
+
 void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t, idx_t> &map) {
 	// Remap expressions owned by this operator
 	auto remap_expr = [&](unique_ptr<Expression> &expr) {
 		if (!expr) {
 			return;
 		}
-		// Use a recursive lambda to walk expression trees
-		std::function<void(Expression &)> walk = [&](Expression &e) {
-			if (e.type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &col_ref = e.Cast<BoundColumnRefExpression>();
-				auto it = map.find(col_ref.binding.table_index);
-				if (it != map.end()) {
-					col_ref.binding.table_index = it->second;
-				}
-			}
-			ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { walk(child); });
-		};
-		walk(*expr);
+		RemapBindingsInExpr(*expr, map);
 	};
 
 	// Remap all expression vectors in the operator

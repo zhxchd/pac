@@ -672,18 +672,20 @@ static void RewriteAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Logic
 	replacer.VisitOperator(*root);
 }
 
+// Collect all aggregates in post-order (bottom-up).
+static void CollectAggregatesPostOrder(LogicalOperator &op, vector<LogicalAggregate *> &aggs) {
+	for (auto &child : op.children) {
+		CollectAggregatesPostOrder(*child, aggs);
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		aggs.push_back(&op.Cast<LogicalAggregate>());
+	}
+}
+
 void RewriteAvgToSumCount(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	// Collect all aggregates in post-order (bottom-up)
 	vector<LogicalAggregate *> aggs;
-	std::function<void(LogicalOperator &)> collect = [&](LogicalOperator &op) {
-		for (auto &child : op.children) {
-			collect(*child);
-		}
-		if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-			aggs.push_back(&op.Cast<LogicalAggregate>());
-		}
-	};
-	collect(*plan);
+	CollectAggregatesPostOrder(*plan, aggs);
 	for (auto *agg : aggs) {
 		RewriteAvgAggregate(input, plan, agg);
 	}

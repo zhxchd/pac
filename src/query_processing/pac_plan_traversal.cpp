@@ -554,6 +554,19 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 	return target_aggregates;
 }
 
+// Check if a specific node pointer exists anywhere in the subtree.
+static bool HasNodeInSubtree(LogicalOperator *op, LogicalOperator *target) {
+	if (op == target) {
+		return true;
+	}
+	for (auto &child : op->children) {
+		if (HasNodeInSubtree(child.get(), target)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // Check if a target node is inside a DELIM_JOIN's subquery branch (children[1]).
 // This is important for correlated subqueries where nodes in the subquery branch
 // cannot directly access tables from the outer query.
@@ -567,20 +580,7 @@ bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOpera
 	// If this is a DELIM_JOIN, check if target is in children[1] (subquery side)
 	if (cur->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
 		if (cur->children.size() >= 2) {
-			// Check if target_node is in the subquery branch (children[1])
-			std::function<bool(LogicalOperator *)> find_target = [&](LogicalOperator *op) -> bool {
-				if (op == target_node) {
-					return true;
-				}
-				for (auto &child : op->children) {
-					if (find_target(child.get())) {
-						return true;
-					}
-				}
-				return false;
-			};
-
-			if (find_target(cur->children[1].get())) {
+			if (HasNodeInSubtree(cur->children[1].get(), target_node)) {
 				return true;
 			}
 		}
@@ -596,6 +596,101 @@ bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOpera
 	return false;
 }
 
+// Recursive helper for AreTableColumnsAccessible.
+// Returns true if the table is found in an accessible path, false if not found or blocked.
+static bool CheckColumnsAccessible(LogicalOperator *op, idx_t table_index) {
+	if (!op) {
+		return false;
+	}
+
+	// If this is the target table, it's accessible from here
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return true;
+		}
+	}
+
+	// Check for join types that block right-side column access
+	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		auto &join = op->Cast<LogicalJoin>();
+
+		// MARK, SEMI, and ANTI joins don't output right-side columns
+		if (join.join_type == JoinType::MARK || join.join_type == JoinType::SEMI ||
+		    join.join_type == JoinType::ANTI || join.join_type == JoinType::RIGHT_SEMI ||
+		    join.join_type == JoinType::RIGHT_ANTI) {
+			// Check if table is in the right child (blocked side)
+			if (op->children.size() >= 2 && HasTableIndexInSubtree(op->children[1].get(), table_index)) {
+				// Table is in the right child of a MARK/SEMI/ANTI join - columns NOT accessible
+				return false;
+			}
+
+			// Check left child (accessible side)
+			if (!op->children.empty() && CheckColumnsAccessible(op->children[0].get(), table_index)) {
+				return true;
+			}
+
+			return false;
+		}
+	}
+
+	// For DELIM_JOIN, accessibility depends on the join type:
+	// - RIGHT_SEMI/RIGHT_ANTI: only RIGHT child columns are accessible (left is filtered out)
+	// - SEMI/ANTI: only LEFT child columns are accessible (right is filtered out)
+	// - INNER/LEFT/etc: left child columns are accessible (right side is correlated subquery)
+	if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		auto &delim_join = op->Cast<LogicalJoin>();
+
+		// For RIGHT_SEMI/RIGHT_ANTI, only right child columns flow through
+		if (delim_join.join_type == JoinType::RIGHT_SEMI || delim_join.join_type == JoinType::RIGHT_ANTI) {
+			// Table in left child is NOT accessible (filtered out by RIGHT_SEMI/RIGHT_ANTI)
+			if (!op->children.empty() && HasTableIndexInSubtree(op->children[0].get(), table_index)) {
+				return false;
+			}
+			// Check right child (accessible side for RIGHT_SEMI/RIGHT_ANTI)
+			if (op->children.size() >= 2 && CheckColumnsAccessible(op->children[1].get(), table_index)) {
+				return true;
+			}
+			return false;
+		}
+
+		// For SEMI/ANTI, only left child columns flow through
+		if (delim_join.join_type == JoinType::SEMI || delim_join.join_type == JoinType::ANTI) {
+			// Table in right child is NOT accessible
+			if (op->children.size() >= 2 && HasTableIndexInSubtree(op->children[1].get(), table_index)) {
+				return false;
+			}
+			// Check left child (accessible side for SEMI/ANTI)
+			if (!op->children.empty() && CheckColumnsAccessible(op->children[0].get(), table_index)) {
+				return true;
+			}
+			return false;
+		}
+
+		// For other join types (INNER, LEFT, etc.), right side is correlated subquery
+		// and left child columns are accessible
+		if (op->children.size() >= 2 && HasTableIndexInSubtree(op->children[1].get(), table_index)) {
+			// Table is in the subquery branch - columns NOT accessible from above
+			return false;
+		}
+		// Check left child
+		if (!op->children.empty() && CheckColumnsAccessible(op->children[0].get(), table_index)) {
+			return true;
+		}
+		return false;
+	}
+
+	// For all other operators, check all children
+	for (auto &child : op->children) {
+		if (CheckColumnsAccessible(child.get(), table_index)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 // Check if a table's columns are accessible from the given starting operator.
 // Returns false if the table is in the right child of a MARK/SEMI/ANTI join,
 // because those join types don't output right-side columns (only the boolean mark).
@@ -604,122 +699,26 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
 		return false;
 	}
 
-	// Helper to check if table_index is in a subtree
-	std::function<bool(LogicalOperator *)> has_table_in_subtree = [&](LogicalOperator *op) -> bool {
-		if (!op) {
-			return false;
+	return CheckColumnsAccessible(from_op, table_index);
+}
+
+// Find a LogicalGet by its table_index in a subtree.
+static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator *op, idx_t table_index) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return &get;
 		}
-		if (op->type == LogicalOperatorType::LOGICAL_GET) {
-			auto &get = op->Cast<LogicalGet>();
-			if (get.table_index == table_index) {
-				return true;
-			}
+	}
+	for (auto &child : op->children) {
+		if (auto *found = FindLogicalGetByTableIndex(child.get(), table_index)) {
+			return found;
 		}
-		for (auto &child : op->children) {
-			if (has_table_in_subtree(child.get())) {
-				return true;
-			}
-		}
-		return false;
-	};
-
-	// Recursive helper that returns:
-	// - true if table is accessible (found in an accessible path)
-	// - false if table is not found or blocked by MARK/SEMI/ANTI join
-	std::function<bool(LogicalOperator *)> check_accessible = [&](LogicalOperator *op) -> bool {
-		if (!op) {
-			return false;
-		}
-
-		// If this is the target table, it's accessible from here
-		if (op->type == LogicalOperatorType::LOGICAL_GET) {
-			auto &get = op->Cast<LogicalGet>();
-			if (get.table_index == table_index) {
-				return true;
-			}
-		}
-
-		// Check for join types that block right-side column access
-		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-		    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
-			auto &join = op->Cast<LogicalJoin>();
-
-			// MARK, SEMI, and ANTI joins don't output right-side columns
-			if (join.join_type == JoinType::MARK || join.join_type == JoinType::SEMI ||
-			    join.join_type == JoinType::ANTI || join.join_type == JoinType::RIGHT_SEMI ||
-			    join.join_type == JoinType::RIGHT_ANTI) {
-				// Check if table is in the right child (blocked side)
-				if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
-					// Table is in the right child of a MARK/SEMI/ANTI join - columns NOT accessible
-					return false;
-				}
-
-				// Check left child (accessible side)
-				if (!op->children.empty() && check_accessible(op->children[0].get())) {
-					return true;
-				}
-
-				return false;
-			}
-		}
-
-		// For DELIM_JOIN, accessibility depends on the join type:
-		// - RIGHT_SEMI/RIGHT_ANTI: only RIGHT child columns are accessible (left is filtered out)
-		// - SEMI/ANTI: only LEFT child columns are accessible (right is filtered out)
-		// - INNER/LEFT/etc: left child columns are accessible (right side is correlated subquery)
-		if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
-			auto &delim_join = op->Cast<LogicalJoin>();
-
-			// For RIGHT_SEMI/RIGHT_ANTI, only right child columns flow through
-			if (delim_join.join_type == JoinType::RIGHT_SEMI || delim_join.join_type == JoinType::RIGHT_ANTI) {
-				// Table in left child is NOT accessible (filtered out by RIGHT_SEMI/RIGHT_ANTI)
-				if (!op->children.empty() && has_table_in_subtree(op->children[0].get())) {
-					return false;
-				}
-				// Check right child (accessible side for RIGHT_SEMI/RIGHT_ANTI)
-				if (op->children.size() >= 2 && check_accessible(op->children[1].get())) {
-					return true;
-				}
-				return false;
-			}
-
-			// For SEMI/ANTI, only left child columns flow through
-			if (delim_join.join_type == JoinType::SEMI || delim_join.join_type == JoinType::ANTI) {
-				// Table in right child is NOT accessible
-				if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
-					return false;
-				}
-				// Check left child (accessible side for SEMI/ANTI)
-				if (!op->children.empty() && check_accessible(op->children[0].get())) {
-					return true;
-				}
-				return false;
-			}
-
-			// For other join types (INNER, LEFT, etc.), right side is correlated subquery
-			// and left child columns are accessible
-			if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
-				// Table is in the subquery branch - columns NOT accessible from above
-				return false;
-			}
-			// Check left child
-			if (!op->children.empty() && check_accessible(op->children[0].get())) {
-				return true;
-			}
-			return false;
-		}
-
-		// For all other operators, check all children
-		for (auto &child : op->children) {
-			if (check_accessible(child.get())) {
-				return true;
-			}
-		}
-
-		return false;
-	};
-
-	return check_accessible(from_op);
+	}
+	return nullptr;
 }
 
 // Helper function to get table name and column name from a column binding
@@ -729,26 +728,7 @@ static std::pair<string, string> GetColumnInfoFromBinding(LogicalOperator *subtr
 		return {"", ""};
 	}
 
-	// Find the LogicalGet with matching table_index
-	std::function<LogicalGet *(LogicalOperator *)> find_get = [&](LogicalOperator *op) -> LogicalGet * {
-		if (!op) {
-			return nullptr;
-		}
-		if (op->type == LogicalOperatorType::LOGICAL_GET) {
-			auto &get = op->Cast<LogicalGet>();
-			if (get.table_index == binding.table_index) {
-				return &get;
-			}
-		}
-		for (auto &child : op->children) {
-			if (auto *found = find_get(child.get())) {
-				return found;
-			}
-		}
-		return nullptr;
-	};
-
-	auto *get = find_get(subtree);
+	auto *get = FindLogicalGetByTableIndex(subtree, binding.table_index);
 	if (!get) {
 		return {"", ""};
 	}
@@ -833,6 +813,41 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PACCompatibilityResult 
 	return false;
 }
 
+// Find the first aggregate in a subtree (depth-first).
+static LogicalAggregate *FindFirstChildAggregate(LogicalOperator *op) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return &op->Cast<LogicalAggregate>();
+	}
+	for (auto &c : op->children) {
+		if (auto *found = FindFirstChildAggregate(c.get())) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+// Find the first aggregate in a subtree, collecting the path of operators traversed.
+// The path does NOT include the returned aggregate itself.
+static LogicalAggregate *FindFirstChildAggregateWithPath(LogicalOperator *op, vector<LogicalOperator *> &path) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return &op->Cast<LogicalAggregate>();
+	}
+	path.push_back(op);
+	for (auto &c : op->children) {
+		if (auto *found = FindFirstChildAggregateWithPath(c.get(), path)) {
+			return found;
+		}
+	}
+	path.pop_back();
+	return nullptr;
+}
+
 // Extended version of FilterTargetAggregates that handles the edge case where inner aggregate
 // groups by PU key (PAC key/PK of Privacy Unit or FK referencing it).
 // In this case, the inner aggregate is skipped and the outer aggregate is noised instead.
@@ -853,27 +868,7 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 	for (auto *agg : all_aggregates) {
 		// Check if this aggregate has a child aggregate (nested aggregate — direct subtree)
 		for (auto &child : agg->children) {
-			LogicalAggregate *inner_agg = nullptr;
-
-			// Traverse down to find the immediate child aggregate
-			std::function<LogicalAggregate *(LogicalOperator *)> find_inner_agg =
-			    [&](LogicalOperator *op) -> LogicalAggregate * {
-				if (!op) {
-					return nullptr;
-				}
-				if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-					return &op->Cast<LogicalAggregate>();
-				}
-				// Don't traverse through projections/filters that might just be wrapping
-				for (auto &c : op->children) {
-					if (auto *found = find_inner_agg(c.get())) {
-						return found;
-					}
-				}
-				return nullptr;
-			};
-
-			inner_agg = find_inner_agg(child.get());
+			auto *inner_agg = FindFirstChildAggregate(child.get());
 
 			if (inner_agg) {
 				// Check if the inner aggregate groups by PU key
@@ -1015,27 +1010,9 @@ LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
 	// between the outer aggregate and the inner aggregate (for binding propagation)
 	vector<LogicalOperator *> path_to_inner;
 
-	std::function<LogicalAggregate *(LogicalOperator *, vector<LogicalOperator *> &)> find_inner_agg =
-	    [&](LogicalOperator *op, vector<LogicalOperator *> &path) -> LogicalAggregate * {
-		if (!op) {
-			return nullptr;
-		}
-		if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-			return &op->Cast<LogicalAggregate>();
-		}
-		path.push_back(op);
-		for (auto &c : op->children) {
-			if (auto *found = find_inner_agg(c.get(), path)) {
-				return found;
-			}
-		}
-		path.pop_back();
-		return nullptr;
-	};
-
 	for (auto &child : target_agg->children) {
 		path_to_inner.clear();
-		LogicalAggregate *inner_agg = find_inner_agg(child.get(), path_to_inner);
+		LogicalAggregate *inner_agg = FindFirstChildAggregateWithPath(child.get(), path_to_inner);
 		if (!inner_agg) {
 			continue;
 		}

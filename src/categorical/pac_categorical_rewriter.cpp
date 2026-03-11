@@ -1300,6 +1300,23 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 // Replaces col_refs matching saved bindings with the saved expression.
 // Avoids recursing into replaced nodes (which would cause infinite recursion since
 // the saved expression itself contains the same binding as an intermediate col_ref).
+// Recursively fix column reference return types to match child operator output types.
+static void FixExprColumnTypes(unique_ptr<Expression> &e, const vector<ColumnBinding> &bindings,
+                                const vector<LogicalType> &types) {
+	if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = e->Cast<BoundColumnRefExpression>();
+		for (idx_t ci = 0; ci < bindings.size() && ci < types.size(); ci++) {
+			if (col_ref.binding == bindings[ci]) {
+				col_ref.return_type = types[ci];
+				break;
+			}
+		}
+	}
+	ExpressionIterator::EnumerateChildren(*e, [&bindings, &types](unique_ptr<Expression> &child) {
+		FixExprColumnTypes(child, bindings, types);
+	});
+}
+
 static void InlineSavedExpressionsIntoExpr(unique_ptr<Expression> &expr,
                                            const unordered_map<uint64_t, unique_ptr<Expression>> &saved_exprs) {
 	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
@@ -1605,19 +1622,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			auto child_bindings = op->children[0]->GetColumnBindings();
 			auto &child_types = op->children[0]->types;
 			auto fix_expr_types = [&](unique_ptr<Expression> &e) {
-				std::function<void(unique_ptr<Expression> &)> Fix = [&](unique_ptr<Expression> &e2) {
-					if (e2->type == ExpressionType::BOUND_COLUMN_REF) {
-						auto &col_ref = e2->Cast<BoundColumnRefExpression>();
-						for (idx_t ci = 0; ci < child_bindings.size() && ci < child_types.size(); ci++) {
-							if (col_ref.binding == child_bindings[ci]) {
-								col_ref.return_type = child_types[ci];
-								break;
-							}
-						}
-					}
-					ExpressionIterator::EnumerateChildren(*e2, Fix);
-				};
-				Fix(e);
+				FixExprColumnTypes(e, child_bindings, child_types);
 			};
 			if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
 				auto &order = op->Cast<LogicalOrder>();
@@ -1759,6 +1764,17 @@ public:
 	}
 };
 
+// Collect binding→type mappings from all operators in the plan tree (post-order).
+static void CollectBindingTypes(LogicalOperator &op, ColRefTypePropagator &propagator) {
+	for (auto &child : op.children) {
+		CollectBindingTypes(*child, propagator);
+	}
+	auto bindings = op.GetColumnBindings();
+	for (idx_t i = 0; i < bindings.size() && i < op.types.size(); i++) {
+		propagator.binding_types[HashBinding(bindings[i])] = op.types[i];
+	}
+}
+
 // After _counters conversion, propagate type changes through col_refs.
 // Builds a global binding→type map from all operators, then updates all col_refs to match.
 static void PropagateTypeChanges(LogicalOperator &plan) {
@@ -1766,16 +1782,7 @@ static void PropagateTypeChanges(LogicalOperator &plan) {
 	plan.ResolveOperatorTypes();
 	// Build global binding → type map
 	ColRefTypePropagator propagator;
-	std::function<void(LogicalOperator &)> collect = [&](LogicalOperator &op) {
-		for (auto &child : op.children) {
-			collect(*child);
-		}
-		auto bindings = op.GetColumnBindings();
-		for (idx_t i = 0; i < bindings.size() && i < op.types.size(); i++) {
-			propagator.binding_types[HashBinding(bindings[i])] = op.types[i];
-		}
-	};
-	collect(plan);
+	CollectBindingTypes(plan, propagator);
 	// Update all col_refs using the visitor (handles expressions, conditions, etc.)
 	propagator.VisitOperator(plan);
 }
