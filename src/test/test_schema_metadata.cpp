@@ -171,8 +171,9 @@ int RunSchemaMetadataTests() {
 			if (path.size() != 3 || Basename(path[0]) != "t_a" || Basename(path[1]) != "t_b" ||
 			    Basename(path[2]) != "t_c") {
 				std::cerr << "FAIL: unexpected path for t_a: [";
-				for (auto &p : path)
+				for (auto &p : path) {
 					std::cerr << p << " ";
+				}
 				std::cerr << "]\n";
 				failures++;
 			} else {
@@ -189,8 +190,9 @@ int RunSchemaMetadataTests() {
 			auto &path = it_b->second;
 			if (path.size() != 2 || Basename(path[0]) != "t_b" || Basename(path[1]) != "t_c") {
 				std::cerr << "FAIL: unexpected path for t_b: [";
-				for (auto &p : path)
+				for (auto &p : path) {
 					std::cerr << p << " ";
+				}
 				std::cerr << "]\n";
 				failures++;
 			} else {
