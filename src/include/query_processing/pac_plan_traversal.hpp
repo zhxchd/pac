@@ -10,6 +10,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "metadata/pac_compatibility_check.hpp"
 
 #include <unordered_map>
@@ -72,6 +73,13 @@ void FindAllNodesByTable(unique_ptr<LogicalOperator> *root, const string &table_
 
 // Check if an operator has a LogicalGet with a specific table index in its subtree.
 bool HasTableIndexInSubtree(LogicalOperator *op, idx_t table_index);
+
+// Find the operator in the plan that produces a given table_index.
+// Checks GET, AGGREGATE (group_index and aggregate_index), PROJECTION, and CTE_REF.
+LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index);
+
+// Find a LogicalMaterializedCTE by its table_index.
+LogicalMaterializedCTE *FindMaterializedCTE(LogicalOperator *op, idx_t cte_table_index);
 
 // Find all LogicalGet nodes with a specific table index in the plan tree.
 void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_index,

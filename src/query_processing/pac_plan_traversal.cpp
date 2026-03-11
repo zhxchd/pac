@@ -428,6 +428,62 @@ bool HasTableIndexInSubtree(LogicalOperator *op, idx_t table_index) {
 	return false;
 }
 
+// Find the operator in the plan that produces a given table_index.
+// Checks GET, AGGREGATE (group_index and aggregate_index), PROJECTION, and CTE_REF.
+LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return op;
+		}
+	} else if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = op->Cast<LogicalAggregate>();
+		if (aggr.group_index == table_index || aggr.aggregate_index == table_index) {
+			return op;
+		}
+	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = op->Cast<LogicalProjection>();
+		if (proj.table_index == table_index) {
+			return op;
+		}
+	} else if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &cte_ref = op->Cast<LogicalCTERef>();
+		if (cte_ref.table_index == table_index) {
+			return op;
+		}
+	}
+	for (auto &child : op->children) {
+		auto *result = FindOperatorByTableIndex(child.get(), table_index);
+		if (result) {
+			return result;
+		}
+	}
+	return nullptr;
+}
+
+// Find a LogicalMaterializedCTE by its table_index.
+LogicalMaterializedCTE *FindMaterializedCTE(LogicalOperator *op, idx_t cte_table_index) {
+	if (!op) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op->Cast<LogicalMaterializedCTE>();
+		if (cte.table_index == cte_table_index) {
+			return &cte;
+		}
+	}
+	for (auto &child : op->children) {
+		auto *result = FindMaterializedCTE(child.get(), cte_table_index);
+		if (result) {
+			return result;
+		}
+	}
+	return nullptr;
+}
+
 // Find all LogicalGet nodes with a specific table index in the plan tree.
 void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_index,
                               vector<unique_ptr<LogicalOperator> *> &results) {
