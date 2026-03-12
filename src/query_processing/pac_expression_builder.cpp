@@ -1019,10 +1019,10 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		GetPacAggregateFunctionName(check_aggr.function.name); // throws if unsupported
 	}
 
-	// === DISTINCT pre-aggregation optimization ===
+	// === DISTINCT pre-aggregation ===
 	// When ALL aggregates are DISTINCT on the same column, use DuckDB's native GROUP BY
-	// for deduplication instead of the slower PacFlatMap-based pac_*_distinct functions.
-	// This leverages DuckDB's optimized GroupedAggregateHashTable instead of our custom hash map.
+	// for deduplication: an inner aggregate groups by the distinct column and ORs the
+	// privacy-unit hashes with bit_or, then an outer pac_count/pac_sum operates on the result.
 	{
 		bool has_any_distinct = false;
 		bool has_any_non_distinct = false;

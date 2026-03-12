@@ -2,6 +2,7 @@
 #include "pac_debug.hpp"
 #include "utils/pac_helpers.hpp"
 #include "parser/pac_parser.hpp"
+#include "query_processing/pac_plan_traversal.hpp"
 
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -288,58 +289,6 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op, const P
 	return found_pac_aggregate;
 }
 
-// Helper: Find a LogicalMaterializedCTE by its table_index (cte_index in CTE_REF nodes)
-static LogicalMaterializedCTE *FindMaterializedCTE(LogicalOperator &op, idx_t cte_table_index) {
-	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
-		auto &cte = op.Cast<LogicalMaterializedCTE>();
-		if (cte.table_index == cte_table_index) {
-			return &cte;
-		}
-	}
-	for (auto &child : op.children) {
-		auto *result = FindMaterializedCTE(*child, cte_table_index);
-		if (result) {
-			return result;
-		}
-	}
-	return nullptr;
-}
-
-// Helper: Find the operator in the plan that produces a given table_index
-static LogicalOperator *FindOperatorByTableIndex(LogicalOperator &op, idx_t table_index) {
-	// Check if this operator produces the table_index
-	if (op.type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = op.Cast<LogicalGet>();
-		if (get.table_index == table_index) {
-			return &op;
-		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = op.Cast<LogicalAggregate>();
-		if (aggr.group_index == table_index || aggr.aggregate_index == table_index) {
-			return &op;
-		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		auto &proj = op.Cast<LogicalProjection>();
-		if (proj.table_index == table_index) {
-			return &op;
-		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_CTE_REF) {
-		auto &cte_ref = op.Cast<LogicalCTERef>();
-		if (cte_ref.table_index == table_index) {
-			return &op;
-		}
-	}
-
-	// Recurse into children
-	for (auto &child : op.children) {
-		auto *result = FindOperatorByTableIndex(*child, table_index);
-		if (result) {
-			return result;
-		}
-	}
-	return nullptr;
-}
-
 // Trace a binding down through the plan to check if it ultimately comes from a PU table.
 // If the binding comes from an aggregate expression, it's safe (the value has been aggregated).
 // If the binding comes from a GROUP BY column, we need to trace that column's source further.
@@ -347,7 +296,7 @@ static LogicalOperator *FindOperatorByTableIndex(LogicalOperator &op, idx_t tabl
 static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding, const vector<string> &pu_tables,
                                   LogicalOperator &root) {
 	// Find the operator that produces this binding's table_index
-	auto *source_op = FindOperatorByTableIndex(root, binding.table_index);
+	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
 	if (!source_op) {
 		return; // Can't find source, assume safe
 	}
@@ -394,7 +343,7 @@ static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &bind
 		}
 	} else if (source_op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &cte_ref = source_op->Cast<LogicalCTERef>();
-		auto *cte_def = FindMaterializedCTE(root, cte_ref.cte_index);
+		auto *cte_def = FindMaterializedCTE(&root, cte_ref.cte_index);
 		if (cte_def && !cte_def->children.empty() && cte_def->children[0]) {
 			auto &cte_body = *cte_def->children[0];
 			auto body_bindings = cte_body.GetColumnBindings();
@@ -411,7 +360,7 @@ static std::pair<string, string>
 GetProtectedColumnInfo(LogicalOperator &root, const ColumnBinding &binding,
                        const std::unordered_map<string, std::unordered_set<string>> &protected_columns) {
 	// Find the LogicalGet that produces this binding
-	auto *source_op = FindOperatorByTableIndex(root, binding.table_index);
+	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
 	if (!source_op || source_op->type != LogicalOperatorType::LOGICAL_GET) {
 		return {"", ""};
 	}
@@ -530,7 +479,7 @@ TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &bindin
 static void
 TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &binding, LogicalOperator &root,
                                 const std::unordered_map<string, std::unordered_set<string>> &protected_columns) {
-	auto *source_op = FindOperatorByTableIndex(root, binding.table_index);
+	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
 	if (!source_op) {
 		return;
 	}
@@ -569,7 +518,7 @@ TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &bindin
 		}
 	} else if (source_op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &cte_ref = source_op->Cast<LogicalCTERef>();
-		auto *cte_def = FindMaterializedCTE(root, cte_ref.cte_index);
+		auto *cte_def = FindMaterializedCTE(&root, cte_ref.cte_index);
 		if (cte_def && !cte_def->children.empty() && cte_def->children[0]) {
 			auto &cte_body = *cte_def->children[0];
 			auto body_bindings = cte_body.GetColumnBindings();
@@ -748,7 +697,7 @@ static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &s
 		to_process.pop();
 
 		// Get foreign keys from this table
-		auto fks = FindForeignKeys(context, current);
+		auto fks = FindPacLinks(context, current);
 		for (auto &fk : fks) {
 			string referenced_table = fk.first;
 
@@ -879,7 +828,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			to_check.pop();
 
 			// Get outgoing PAC_LINKs
-			auto fks = FindForeignKeys(context, current);
+			auto fks = FindPacLinks(context, current);
 			for (auto &fk : fks) {
 				string ref_table = fk.first;
 				if (visited.find(ref_table) != visited.end()) {
@@ -922,13 +871,13 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	for (auto &name : scanned_tables) {
 		ColumnMetadata md;
 		md.table_name = name;
-		md.pks = FindPrimaryKey(context, name);
-		md.fks = FindForeignKeys(context, name);
+		md.pks = FindPacKey(context, name);
+		md.fks = FindPacLinks(context, name);
 		result.table_metadata[name] = std::move(md);
 	}
 
 	// Compute PAC_LINK paths from scanned tables to any privacy unit (transitive)
-	auto fk_paths = FindForeignKeyBetween(context, all_privacy_units, scanned_tables);
+	auto fk_paths = FindPacLinkPath(context, all_privacy_units, scanned_tables);
 
 	// Populate metadata for tables in FK paths that aren't scanned
 	for (auto &kv : fk_paths) {
@@ -936,8 +885,8 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			if (result.table_metadata.find(tbl) == result.table_metadata.end()) {
 				ColumnMetadata md;
 				md.table_name = tbl;
-				md.pks = FindPrimaryKey(context, tbl);
-				md.fks = FindForeignKeys(context, tbl);
+				md.pks = FindPacKey(context, tbl);
+				md.fks = FindPacLinks(context, tbl);
 				result.table_metadata[tbl] = std::move(md);
 			}
 		}
@@ -948,11 +897,11 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		if (result.table_metadata.find(t) == result.table_metadata.end()) {
 			ColumnMetadata md;
 			md.table_name = t;
-			md.pks = FindPrimaryKey(context, t);
-			md.fks = FindForeignKeys(context, t);
+			md.pks = FindPacKey(context, t);
+			md.fks = FindPacLinks(context, t);
 			result.table_metadata[t] = std::move(md);
 		} else if (result.table_metadata[t].pks.empty()) {
-			auto pk = FindPrimaryKey(context, t);
+			auto pk = FindPacKey(context, t);
 			if (!pk.empty()) {
 				result.table_metadata[t].pks = pk;
 			}

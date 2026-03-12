@@ -45,15 +45,17 @@ make test
 
 ## Build Flags
 
-Compile-time flags control algorithmic behavior for scientific reproducibility.
-Set them via `cmake` defines (e.g., `-DPAC_NOAPPROX=1`).
+Compile-time flags control algorithm variants, primarily for benchmarking and scientific reproducibility.
+Set them via `cmake` defines (e.g., `-DPAC_NOBUFFERING=1`).
 
 | Flag | Effect |
 |------|--------|
-| `PAC_NOAPPROX` | Disable approximate sum, use exact cascading |
-
-Additional flags exist for microbenchmark configurations. See
-[docs/benchmark/microbenchmarks.md](../benchmark/microbenchmarks.md) for details.
+| `PAC_NOBUFFERING` | Disable input buffering (lazy allocation) |
+| `PAC_NOCASCADING` | Pre-allocate all accumulator levels |
+| `PAC_NOSIMD` | No-cascading with SIMD-unfriendly update kernels and auto-vectorization disabled |
+| `PAC_NOBOUNDOPT` | Disable bound optimization (only affects min/max) |
+| `PAC_SIGNEDSUM` | Disable handling negative values in signed sums using separate (negated) counters |
+| `PAC_EXACTSUM` | Disable approximate sum optimization, use exact cascading (implies signedsum) |
 
 ## Updating the DuckDB Version
 

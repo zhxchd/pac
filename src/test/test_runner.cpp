@@ -25,7 +25,7 @@ int main() {
 		std::cerr << "✓ Compiler function tests passed\n";
 	}
 
-	// Test 2: Schema Metadata (FindPrimaryKey, FindForeignKeys, FindForeignKeyBetween)
+	// Test 2: Schema Metadata (FindPacKey, FindPacLinks, FindPacLinkPath)
 	std::cerr << "\n[2/4] Running schema metadata tests...\n";
 	code = duckdb::RunSchemaMetadataTests();
 	if (code != 0) {

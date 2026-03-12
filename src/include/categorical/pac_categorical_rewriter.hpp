@@ -305,31 +305,6 @@ static inline string FindPacAggregateInOperator(LogicalOperator *op) {
 	return "";
 }
 
-// Helper: Find the operator in the plan that produces a given table_index
-static inline LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index) {
-	// Check if this operator produces the table_index
-	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		auto &proj = op->Cast<LogicalProjection>();
-		if (proj.table_index == table_index) {
-			return op;
-		}
-	} else if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = op->Cast<LogicalAggregate>();
-		if (aggr.group_index == table_index || aggr.aggregate_index == table_index) {
-			return op;
-		}
-	}
-	// Note: Joins don't have their own table_index, they pass through from children
-	// So we just recurse into children (handled below)
-	for (auto &child : op->children) {
-		auto *result = FindOperatorByTableIndex(child.get(), table_index);
-		if (result) {
-			return result;
-		}
-	}
-	return nullptr;
-}
-
 // DuckDB wraps scalar subqueries in a runtime check that the query returns 1 row. For our rewrites, we know this is
 // fine, and the wrapper operators are in the way, so we find and remove them, when inside a rewritten subtree.
 //

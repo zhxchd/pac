@@ -596,8 +596,8 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			counters[j] = child_values[child_idx];
 		}
-		result_data[i] = PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction, gen, true,
-		                                              ~key_hash, bind_data.query_hash, bind_data.pstate);
+		result_data[i] = PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction, gen, ~key_hash,
+		                                              bind_data.query_hash, bind_data.pstate);
 	}
 }
 
@@ -737,9 +737,8 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 			PAC_FLOAT c = cnt_values[c_idx];
 			counters[j] = s / c; // 0/0 → NaN, which propagates correctly
 		}
-		result_data[i] =
-		    static_cast<double>(PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction, gen, true,
-		                                                     ~key_hash, bind_data.query_hash, bind_data.pstate));
+		result_data[i] = static_cast<double>(PacNoisySampleFrom64Counters(
+		    counters, bind_data.mi, bind_data.correction, gen, ~key_hash, bind_data.query_hash, bind_data.pstate));
 	}
 }
 

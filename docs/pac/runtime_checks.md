@@ -91,9 +91,3 @@ This optimization works on all distributions **except** monotonically increasing
 - With two-sided: `result[j] = 2 * (pos[j] - neg[j])`, the counter hierarchy preserves natural spread. `z^2` normalizes to ~0.004, `var_ratio` to ~1.0
 
 Columns with signed types (e.g., DECIMAL) that only contain positive values still benefit because the negative side is lazily allocated and stays NULL, giving unsigned performance as a bonus.
-
-### Approximate Sum Precision
-
-The approximate sum uses 16-bit cascading counters in 25 lazily allocated levels. Each level cascades to the next every 4 values, based on the most significant bit of the incoming value. The worst-case relative error from cascading is `2^-12 ≈ 0.024%` — negligible compared to PAC noise which is at least a few percent.
-
-The approximation is only used for integer/BIGINT sums. FLOAT/DOUBLE sums use exact cascading (64-bit counters) since floating-point arithmetic is already inexact.

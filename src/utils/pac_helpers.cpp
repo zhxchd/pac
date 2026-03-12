@@ -292,7 +292,7 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 // Find PAC_KEY column names for the given table.
 // Only uses PAC metadata (no database PRIMARY KEY detection).
 // Returns empty vector when no PAC_KEY is defined.
-vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) {
+vector<string> FindPacKey(ClientContext &context, const string &table_name) {
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
 	// Helper that checks a vector of column names exist and are numeric; returns the vector if valid,
@@ -356,7 +356,7 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 // Find PAC_LINK relationships declared on the given table.
 // Returns a vector of (referenced_table_name, local_column_names) pairs.
 // Only uses PAC metadata (no database FOREIGN KEY detection).
-vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name) {
+vector<std::pair<string, vector<string>>> FindPacLinks(ClientContext &context, const string &table_name) {
 	vector<std::pair<string, vector<string>>> result;
 
 	// Extract unqualified table name for PAC metadata lookup
@@ -408,8 +408,8 @@ vector<string> FindReferencedPKColumns(ClientContext &context, const string &tab
 // Performs a BFS over outgoing PAC_LINK edges to find the shortest path from each start
 // table to any privacy unit. Returns a map from the original start table string to the path
 // (vector of table names from start to privacy unit inclusive).
-std::unordered_map<string, vector<string>>
-FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_units, const vector<string> &table_names) {
+std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &context, const vector<string> &privacy_units,
+                                                           const vector<string> &table_names) {
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
 	auto ResolveQualified = [&](const string &tbl_name) -> string {
@@ -462,7 +462,7 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			string cur = q.front();
 			q.pop();
 			// Find outgoing FK edges from cur
-			auto fks = FindForeignKeys(context, cur);
+			auto fks = FindPacLinks(context, cur);
 			for (auto &p : fks) {
 				string neighbor = p.first; // referenced table name (unqualified now)
 				string neighbor_name = StringUtil::Lower(ResolveQualified(neighbor)); // normalize to lowercase
@@ -585,25 +585,26 @@ bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool 
 	return default_value;
 }
 
+// Collect a map from table_index to the operator that produces it.
+static void CollectOperatorsByTableIndex(LogicalOperator &op,
+                                         std::unordered_map<idx_t, LogicalOperator *> &table_index_to_op) {
+	auto bindings = op.GetColumnBindings();
+	if (!bindings.empty()) {
+		idx_t op_table_index = bindings[0].table_index;
+		table_index_to_op[op_table_index] = &op;
+	}
+	for (auto &child : op.children) {
+		if (child) {
+			CollectOperatorsByTableIndex(*child, table_index_to_op);
+		}
+	}
+}
+
 // Helper to trace a binding back through the plan to find which LogicalGet it originates from
 static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &binding) {
 	// Build a map from table_index to the operator that produces it
 	std::unordered_map<idx_t, LogicalOperator *> table_index_to_op;
-
-	std::function<void(LogicalOperator &)> collect_ops = [&](LogicalOperator &op) {
-		auto bindings = op.GetColumnBindings();
-		if (!bindings.empty()) {
-			// Map this operator's table_index to the operator itself
-			idx_t op_table_index = bindings[0].table_index;
-			table_index_to_op[op_table_index] = &op;
-		}
-		for (auto &child : op.children) {
-			if (child) {
-				collect_ops(*child);
-			}
-		}
-	};
-	collect_ops(plan);
+	CollectOperatorsByTableIndex(plan, table_index_to_op);
 
 	// Start from the binding's table_index and trace backwards
 	idx_t current_table_index = binding.table_index;
@@ -810,24 +811,25 @@ bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const
 	return false;
 }
 
+// Recursively remap BoundColumnRefExpression bindings in an expression tree.
+static void RemapBindingsInExpr(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
+	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = e.Cast<BoundColumnRefExpression>();
+		auto it = map.find(col_ref.binding.table_index);
+		if (it != map.end()) {
+			col_ref.binding.table_index = it->second;
+		}
+	}
+	ExpressionIterator::EnumerateChildren(e, [&map](Expression &child) { RemapBindingsInExpr(child, map); });
+}
+
 void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t, idx_t> &map) {
 	// Remap expressions owned by this operator
 	auto remap_expr = [&](unique_ptr<Expression> &expr) {
 		if (!expr) {
 			return;
 		}
-		// Use a recursive lambda to walk expression trees
-		std::function<void(Expression &)> walk = [&](Expression &e) {
-			if (e.type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &col_ref = e.Cast<BoundColumnRefExpression>();
-				auto it = map.find(col_ref.binding.table_index);
-				if (it != map.end()) {
-					col_ref.binding.table_index = it->second;
-				}
-			}
-			ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { walk(child); });
-		};
-		walk(*expr);
+		RemapBindingsInExpr(*expr, map);
 	};
 
 	// Remap all expression vectors in the operator
