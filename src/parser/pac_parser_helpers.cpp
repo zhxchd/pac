@@ -277,6 +277,14 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 	// Extract protected columns
 	ExtractProtectedColumns(query, metadata.protected_columns);
 
+	// Check for bare PROTECTED keyword without parentheses (common syntax mistake)
+	// e.g. "value INT PROTECTED" instead of "PROTECTED (value)"
+	if (std::regex_search(query_lower, std::regex(R"(\bprotected\b)")) && metadata.protected_columns.empty()) {
+		throw ParserException(
+		    "Invalid PROTECTED syntax. Use PROTECTED (col1, col2, ...) as a separate clause, not inline after a column "
+		    "type. Example: CREATE PU TABLE t (id INT, val INT, PAC_KEY (id), PROTECTED (val))");
+	}
+
 	// Validate: CREATE PU TABLE must have PAC_KEY
 	if (is_create_pu_table) {
 		if (metadata.primary_key_columns.empty()) {
