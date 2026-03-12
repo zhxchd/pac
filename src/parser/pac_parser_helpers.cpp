@@ -274,6 +274,14 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 		}
 	}
 
+	// Check for PAC_LINK without REFERENCES (common syntax mistake)
+	// e.g. "PAC_LINK(col, table, ref)" instead of "PAC_LINK(col) REFERENCES table(ref)"
+	if (std::regex_search(query_lower, std::regex(R"(\bpac_link\s*\()")) && metadata.links.empty()) {
+		throw ParserException(
+		    "Invalid PAC_LINK syntax. Use PAC_LINK (col) REFERENCES table(ref_col). "
+		    "Example: CREATE TABLE t (id INT, fk INT, PAC_LINK (fk) REFERENCES other_table(id), PROTECTED (id))");
+	}
+
 	// Extract protected columns
 	ExtractProtectedColumns(query, metadata.protected_columns);
 
