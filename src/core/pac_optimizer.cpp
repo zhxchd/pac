@@ -172,8 +172,20 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		return;
 	}
 
-	// compute normalized query hash once for file naming
-	string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
+	// Compute normalized query hash once for file naming.
+	// When another optimizer extension (e.g. OpenIVM's IVM rewrite) replans a query
+	// inside its own hook, the new Optimizer runs on a Connection context whose
+	// active_query is NULL. DuckDB's GetCurrentQuery() dereferences that unique_ptr
+	// and throws InternalException. The query string is only used for the compiled-
+	// file hash, so we fall back to a fixed string to let PAC compilation proceed
+	// (needed so delta queries get pac_noised_sum / pac_hash rewrites).
+	string current_query;
+	try {
+		current_query = input.context.GetCurrentQuery();
+	} catch (InternalException &) {
+		current_query = "replan";
+	}
+	string normalized = NormalizeQueryForHash(current_query);
 	string query_hash = HashStringToHex(normalized);
 	vector<string> privacy_units = std::move(discovered_pus);
 #if PAC_DEBUG
