@@ -63,9 +63,12 @@ namespace duckdb {
 // Information about a single PAC aggregate binding found in an expression
 struct PacBindingInfo {
 	ColumnBinding binding;
-	string aggregate_name;     // e.g., "pac_noised_sum", "pac_noised_count"
-	LogicalType original_type; // The type before conversion to LIST<DOUBLE>
-	idx_t index;               // Position in the list (0-based, for list_zip field access)
+	string aggregate_name;        // e.g., "pac_noised_sum", "pac_noised_count"
+	LogicalType original_type;    // The type before conversion to LIST<DOUBLE>
+	idx_t index;                  // Position in the list (0-based, for list_zip field access)
+	ColumnBinding source_binding; // The aggregate-level binding that defines this PAC aggregate
+	PacBindingInfo() : index(0) {
+	}
 };
 
 // Information about a detected categorical pattern
@@ -83,10 +86,9 @@ struct CategoricalPatternInfo {
 	// The original return type of the PAC aggregate expression (before conversion to LIST<DOUBLE>)
 	// Used by double-lambda rewrite to cast list elements back to the expected type
 	LogicalType original_return_type;
-	// Scalar subquery wrapper that was skipped during pattern detection (if any)
-	// Points to the outer Projection of the pattern: Project(CASE) -> Aggregate(first) -> Project
-	// When set, these three operators should be stripped during rewrite
-	LogicalOperator *scalar_wrapper_op;
+	// The aggregate-level binding (table_index=aggregate_index, column_index=expression index)
+	// that defines this pattern's PAC aggregate. Set during detection by tracing the binding.
+	ColumnBinding source_binding;
 	// Pre-collected PAC bindings from detection
 	vector<PacBindingInfo> pac_bindings;
 	// Hash binding from outer PAC aggregate (resolved to filter level)
@@ -95,8 +97,7 @@ struct CategoricalPatternInfo {
 	bool has_outer_pac_hash = false;
 
 	CategoricalPatternInfo()
-	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE),
-	      scalar_wrapper_op(nullptr) {
+	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE) {
 	}
 };
 

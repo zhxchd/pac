@@ -215,37 +215,6 @@ static PacFilterParams GetPacFilterParams(ExpressionState &state) {
 	return {mi, correction, local_state.gen};
 }
 
-// pac_filter(UBIGINT hash) -> BOOLEAN
-// Returns true if the bit at the counter position selected by query_hash is set.
-// The input hash already has query_hash XOR'd in by pac_hash(), so the bit positions
-// are query-specific. We check bit (query_hash % 64).
-static void PacFilterFromHashFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	idx_t count = args.size();
-
-	uint64_t qh = 0;
-	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	if (function.bind_info) {
-		qh = function.bind_info->Cast<PacCategoricalBindData>().query_hash;
-	}
-	int bit_pos = static_cast<int>(qh % 64);
-
-	UnifiedVectorFormat hash_data;
-	args.data[0].ToUnifiedFormat(count, hash_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-
-	auto result_data = FlatVector::GetData<bool>(result);
-	auto &result_validity = FlatVector::Validity(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto idx = hash_data.sel->get_index(i);
-		if (!hash_data.validity.RowIsValid(idx)) {
-			result_validity.SetInvalid(i);
-		} else {
-			result_data[i] = (hashes[idx] >> bit_pos) & 1ULL;
-		}
-	}
-}
-
 // pac_filter(list<bool>) -> BOOLEAN
 // Converts list to mask, then applies filter logic
 static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -1174,11 +1143,6 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	ScalarFunction pac_select_fn("pac_select", {LogicalType::UBIGINT, list_bool_type}, LogicalType::UBIGINT,
 	                             PacSelectFunction, PacCategoricalBind);
 	loader.RegisterFunction(pac_select_fn);
-
-	// pac_filter(UBIGINT hash) -> BOOLEAN : true if selected counter bit is set in hash
-	ScalarFunction pac_filter_hash("pac_filter", {LogicalType::UBIGINT}, LogicalType::BOOLEAN,
-	                               PacFilterFromHashFunction, PacCategoricalBind);
-	loader.RegisterFunction(pac_filter_hash);
 
 	// pac_filter(list<bool>) -> BOOLEAN : Probabilistic filter from list (convenience)
 	ScalarFunction pac_filter_list("pac_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,
