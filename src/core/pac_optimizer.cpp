@@ -138,6 +138,11 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		check_plan = plan->children[0].get();
 	}
 	// TODO: why this particular collection of operators? Maybe check against DDL or DML
+	// For DISTINCT, look through to the child — SELECT DISTINCT has PROJECTION underneath,
+	// but UNION's deduplication has LOGICAL_UNION underneath and should not enter PAC.
+	if (check_plan->type == LogicalOperatorType::LOGICAL_DISTINCT && !check_plan->children.empty()) {
+		check_plan = check_plan->children[0].get();
+	}
 	if (check_plan->type != LogicalOperatorType::LOGICAL_PROJECTION &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_TOP_N &&

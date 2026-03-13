@@ -97,20 +97,6 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 	return false;
 }
 
-static bool ContainsLogicalDistinct(const LogicalOperator &op) {
-	// Only check for explicit DISTINCT operator (SELECT DISTINCT), not aggregate DISTINCT
-	if (op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
-		return true;
-	}
-
-	for (auto &child : op.children) {
-		if (ContainsLogicalDistinct(*child)) {
-			return true;
-		}
-	}
-	return false;
-}
-
 static bool ContainsAggregation(const LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &aggr = op.Cast<LogicalAggregate>();
@@ -458,7 +444,8 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 		}
 	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY ||
 	           current_op.type == LogicalOperatorType::LOGICAL_TOP_N ||
-	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT) {
+	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT ||
+	           current_op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotFromPU(*child, plan_root, pu_tables, tables_with_protected_cols);
 		}
@@ -580,7 +567,8 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 		}
 	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY ||
 	           current_op.type == LogicalOperatorType::LOGICAL_TOP_N ||
-	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT) {
+	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT ||
+	           current_op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotProtected(*child, plan_root, protected_columns);
 		}
@@ -1084,12 +1072,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			if (is_conservative) {
 				throw InvalidInputException(
 				    "Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
-			}
-			return result;
-		}
-		if (ContainsLogicalDistinct(*plan)) {
-			if (is_conservative) {
-				throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
 			}
 			return result;
 		}
