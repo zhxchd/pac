@@ -19,7 +19,6 @@ Queries that reference privacy-relevant tables but cannot be safely privatized. 
 - Protected columns appear in `GROUP BY` keys (would leak individual values)
 - The query contains **window functions** (`OVER`)
 - The query contains **recursive CTEs** (`WITH RECURSIVE`)
-- The query contains `SELECT DISTINCT` (the `LOGICAL_DISTINCT` operator)
 - The query contains disallowed joins: `EXCEPT`, `INTERSECT` (but `UNION`/`CROSS_PRODUCT` are allowed)
 - The query has **no allowed aggregation** (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`)
 - Multiple protected tables are joined on columns that are **not** exact PAC LINKs
@@ -38,7 +37,9 @@ When the Privacy Unit table is scanned in the query (e.g., `SELECT COUNT(*) FROM
    - Composite PAC_KEY: `pac_hash(hash(key1) XOR hash(key2) XOR ...)` — XOR combines multiple column hashes into one, then pac_hash repairs it to 32 bits
 3. **Insert a projection** above the PU table scan that computes the hash as an extra column
 4. **Propagate** the hash column through all intermediate operators (projections, joins, filters) between the PU scan and the aggregate — this means adding the column to every operator's output along the path so the aggregate can see it
-5. **Replace** each standard aggregate with its PAC equivalent: `SUM(x)` becomes `pac_sum(hash, x)`, `COUNT(*)` becomes `pac_count(hash)`, etc.
+5. **Replace** each standard aggregate with its PAC equivalent: `SUM(x)` becomes `pac_noised_sum(hash, x)`, `COUNT(*)` becomes `pac_noised_count(hash)`, etc.
+
+> **PAC aggregate naming:** base functions (`pac_count`, `pac_sum`, ...) return `LIST<T>` — 64 per-sample counters. `pac_noised(list<T>):T` applies noise and returns a scalar. The `pac_noised_<aggr>()` variants (e.g., `pac_noised_count`) are fused shortcuts: `pac_noised_count(hash)` = `pac_noised(pac_count(hash))`. Similarly, `pac_select` and `pac_filter` consume counter lists for categorical queries.
 6. For **multiple PUs**, AND all hashes together: `hash1 AND hash2` — a tuple is in sub-sample j only if ALL its PUs have bit j set
 
 ### Example: Direct PU scan
@@ -46,7 +47,7 @@ When the Privacy Unit table is scanned in the query (e.g., `SELECT COUNT(*) FROM
 -- Original
 SELECT COUNT(*) FROM customer WHERE c_mktsegment = 'BUILDING'
 -- Rewritten (conceptual)
-SELECT pac_count_noised(pac_hash(hash(c_custkey)))
+SELECT pac_noised_count(pac_hash(hash(c_custkey)))
 FROM customer WHERE c_mktsegment = 'BUILDING'
 ```
 
@@ -70,7 +71,7 @@ When the query scans dependent tables but not the PU itself (e.g., `SELECT SUM(l
 SELECT l_returnflag, SUM(l_quantity) FROM lineitem
 WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag
 -- Rewritten (conceptual)
-SELECT l_returnflag, pac_sum_noised(pac_hash(hash(o_custkey)), l_quantity)
+SELECT l_returnflag, pac_noised_sum(pac_hash(hash(o_custkey)), l_quantity)
 FROM lineitem JOIN orders ON l_orderkey = o_orderkey
 WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag
 ```
@@ -152,7 +153,7 @@ Two paths depending on plan structure:
 
 ## DISTINCT Aggregates
 
-`SELECT DISTINCT` is **rejected** by the compatibility checker. However, **aggregate DISTINCT** (e.g., `COUNT(DISTINCT col)`) is supported:
+**Aggregate DISTINCT** (e.g., `COUNT(DISTINCT col)`) is rewritten:
 
 - `COUNT(DISTINCT x)` is handled via pre-aggregation: the compiler inserts a `GROUP BY x` with `bit_or(key_hash)` before the standard `pac_noised_count` aggregate
 - `SUM(DISTINCT x)` similarly uses `GROUP BY x` with `bit_or(key_hash)` before `pac_noised_sum`
