@@ -27,6 +27,23 @@ PAC benchmarks are compiled as **separate standalone executables** (not run thro
 ### Reproducibility
 All the benchmarks have been executed on Ubuntu 24.04. Further, the latest version of `clang` should be compiled and installed, to then compile our extension with it.
 ```bash
+for the microbenchmarks, get the following instances on EC2:
+- i8gd.4xlarge 16xGraviton4 2.7GHz, 32GB RAm, 950GB SSD
+- c8i.4xlarge 16xGranite Rapids 3.9GHz,32GB RAM, EBS: choose 90GB io2
+- c8a.4xlarge 16xEPYC 9R45 4.5GHz, 32GB RAM, EBS: choose 90GB io2
+
+choose Ubuntu 24 as the OS (ssh ubuntu@public-ip -i yourkey.pem into it)
+
+# only for graviton i8gd instance -- install a filesystem on its ssd
+sudo parted /dev/nvme0n1 -- mklabel gpt
+sudo parted /dev/nvme0n1 -- mkpart primary ext4 0% 200GB
+sudo mkfs.ext4 /dev/nvme0n1p1
+sudo mkdir -p /mnt/instance-store
+sudo mount /dev/nvme0n1p1 /mnt/instance-store
+cd /mnt/instance-store/
+chmod 777 .
+
+# for all instances:
 sudo apt update && sudo apt upgrade
 sudo apt install -y \
   build-essential \
