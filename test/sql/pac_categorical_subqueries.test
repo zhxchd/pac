@@ -696,6 +696,43 @@ LIMIT 10;
 # Cleanup
 # ============================================================================
 
+# ============================================================================
+# Mixed DISTINCT + non-DISTINCT with HAVING (crash 25962)
+# Multi-branch pre-aggregation creates Projection → Join → Aggregate branches.
+# The categorical rewriter must recognize the HAVING predicate through the
+# multi-branch projection so it doesn't incorrectly convert aggregates to
+# counters (which changes types to LIST<FLOAT> and breaks the projection).
+# ============================================================================
+statement ok
+SELECT s.s_name, p.p_name,
+    SUM(ps.ps_availqty) AS total_avail,
+    COUNT(DISTINCT c.c_custkey) AS unique_customers,
+    AVG(o.o_totalprice) AS avg_price
+FROM supplier s
+JOIN partsupp ps ON s.s_suppkey = ps.ps_suppkey
+JOIN part p ON ps.ps_partkey = p.p_partkey
+JOIN lineitem l ON l.l_partkey = p.p_partkey
+JOIN orders o ON l.l_orderkey = o.o_orderkey
+JOIN customer c ON o.o_custkey = c.c_custkey
+GROUP BY s.s_name, p.p_name
+HAVING SUM(ps.ps_availqty) > 100
+ORDER BY total_avail DESC, avg_price ASC;
+
+# Same pattern with CONCAT referencing both DISTINCT and non-DISTINCT aggregates (crash 27701)
+statement ok
+SELECT part.p_name, supplier.s_name,
+    COUNT(DISTINCT orders.o_orderkey) AS order_count,
+    SUM(lineitem.l_extendedprice) AS total_revenue,
+    CONCAT('Supplier ', supplier.s_name, ' order count: ', COUNT(DISTINCT orders.o_orderkey)) AS summary
+FROM part
+JOIN partsupp ON part.p_partkey = partsupp.ps_partkey
+JOIN supplier ON partsupp.ps_suppkey = supplier.s_suppkey
+JOIN lineitem ON part.p_partkey = lineitem.l_partkey
+JOIN orders ON lineitem.l_orderkey = orders.o_orderkey
+GROUP BY part.p_name, supplier.s_name
+HAVING SUM(lineitem.l_extendedprice) > 10000
+ORDER BY total_revenue DESC;
+
 statement ok
 DROP TABLE lineitem;
 

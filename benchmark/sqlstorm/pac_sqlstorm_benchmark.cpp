@@ -1054,6 +1054,28 @@ static void PrintErrorBreakdown(const string &label, const PassStats &stats, int
 		}
 	}
 
+	// Collect Invalid errors grouped by message, with query names
+	std::map<string, vector<string>> invalid_groups;
+	for (auto &e : sorted_errors) {
+		if (e.first.find("Invalid Error") != string::npos) {
+			auto it = stats.error_queries.find(e.first);
+			if (it != stats.error_queries.end()) {
+				invalid_groups[e.first] = it->second;
+			}
+		}
+	}
+	if (!invalid_groups.empty()) {
+		Log("=== " + label + " Invalid Errors (queries) ===");
+		for (auto &g : invalid_groups) {
+			string msg = g.first;
+			if (msg.size() > 100) {
+				msg = msg.substr(0, 100) + "...";
+			}
+			Log("  " + msg);
+			Log("    queries: " + FormatQueryList(g.second));
+		}
+	}
+
 	if (!stats.timeout_queries.empty()) {
 		Log("=== " + label + " Timeouts (" + std::to_string(stats.timeout_queries.size()) + ") ===");
 		Log("  queries: " + FormatQueryList(stats.timeout_queries, 20));

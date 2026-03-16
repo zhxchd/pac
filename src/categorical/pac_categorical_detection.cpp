@@ -140,9 +140,15 @@ static bool IsHavingBinding(LogicalOperator *filter_op, const ColumnBinding &bin
 	if (!filter_op || filter_op->children.empty()) {
 		return false;
 	}
-	// Walk through projections to find the child aggregate
+	// Walk through projections to find the child aggregate.
+	// Also check if the binding references any projection we walk through
+	// (handles multi-branch case where Projection replaces the original Aggregate).
 	LogicalOperator *child = filter_op->children[0].get();
 	while (child && child->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = child->Cast<LogicalProjection>();
+		if (binding.table_index == proj.table_index) {
+			return true;
+		}
 		if (child->children.empty()) {
 			break;
 		}

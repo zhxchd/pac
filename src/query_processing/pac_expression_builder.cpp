@@ -832,6 +832,17 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		built_branches.push_back(std::move(bb));
 	}
 
+	// Save branch expression types before step 4 moves subtrees
+	vector<vector<LogicalType>> branch_expr_types;
+	for (auto &bb : built_branches) {
+		auto &branch_agg = bb.subtree->Cast<LogicalAggregate>();
+		vector<LogicalType> types;
+		for (auto &expr : branch_agg.expressions) {
+			types.push_back(expr->return_type);
+		}
+		branch_expr_types.push_back(std::move(types));
+	}
+
 	// 4. Join branches together
 	unique_ptr<LogicalOperator> joined = std::move(built_branches[0].subtree);
 	idx_t left_group_index = built_branches[0].group_index;
@@ -883,12 +894,23 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		if (it == agg_idx_to_branch.end()) {
 			throw InternalException("PAC compiler: multi-branch could not find aggregate " + std::to_string(ai));
 		}
-		auto &branch = built_branches[it->second.first];
+		idx_t branch_idx = it->second.first;
 		idx_t pos_in_branch = it->second.second;
+		auto &branch = built_branches[branch_idx];
 
-		auto agg_type = agg->expressions[ai]->return_type;
-		proj_expressions.push_back(
-		    make_uniq<BoundColumnRefExpression>(agg_type, ColumnBinding(branch.agg_index, pos_in_branch)));
+		auto original_type = agg->expressions[ai]->return_type;
+		auto branch_type = branch_expr_types[branch_idx][pos_in_branch];
+
+		PAC_DEBUG_PRINT("MultiBranch output: ai=" + std::to_string(ai) + " branch=" + std::to_string(branch_idx) +
+		                " pos=" + std::to_string(pos_in_branch) + " agg_index=" + std::to_string(branch.agg_index) +
+		                " original_type=" + original_type.ToString() + " branch_type=" + branch_type.ToString());
+
+		unique_ptr<Expression> ref =
+		    make_uniq<BoundColumnRefExpression>(branch_type, ColumnBinding(branch.agg_index, pos_in_branch));
+		if (branch_type != original_type) {
+			ref = BoundCastExpression::AddCastToType(input.context, std::move(ref), original_type);
+		}
+		proj_expressions.push_back(std::move(ref));
 	}
 
 	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));

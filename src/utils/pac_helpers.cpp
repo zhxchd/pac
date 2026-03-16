@@ -16,6 +16,7 @@
 #include "duckdb/planner/operator/logical_cte.hpp"
 #include "duckdb/planner/operator/logical_recursive_cte.hpp"
 #include "duckdb/planner/operator/logical_expression_get.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -182,6 +183,10 @@ void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_
 	} else if (auto eg_ptr = dynamic_cast<LogicalExpressionGet *>(node)) {
 		if (map.find(eg_ptr->table_index) != map.end()) {
 			eg_ptr->table_index = map.at(eg_ptr->table_index);
+		}
+	} else if (auto cteref_ptr = dynamic_cast<LogicalCTERef *>(node)) {
+		if (map.find(cteref_ptr->table_index) != map.end()) {
+			cteref_ptr->table_index = map.at(cteref_ptr->table_index);
 		}
 	}
 
