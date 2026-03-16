@@ -246,8 +246,18 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
 		is_pac_ddl = true;
 	}
 
-	// If no PAC syntax found, return empty result (let normal parser handle it)
+	// If no PAC syntax found, check for common typos before falling through to DuckDB parser
 	if (!is_pac_ddl) {
+		string query_lower = StringUtil::Lower(clean_query);
+		// Detect "PAC KEY" / "PAC LINK" (space instead of underscore)
+		if (std::regex_search(query_lower, std::regex(R"(\bpac\s+key\b)"))) {
+			throw ParserException("Did you mean PAC_KEY (with underscore)? "
+			                      "Use PAC_KEY (col) to define the privacy unit key.");
+		}
+		if (std::regex_search(query_lower, std::regex(R"(\bpac\s+link\b)"))) {
+			throw ParserException("Did you mean PAC_LINK (with underscore)? "
+			                      "Use PAC_LINK (col) REFERENCES table(ref_col).");
+		}
 		return ParserExtensionParseResult();
 	}
 

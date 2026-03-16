@@ -296,6 +296,11 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 	// Validate: CREATE PU TABLE must have PAC_KEY
 	if (is_create_pu_table) {
 		if (metadata.primary_key_columns.empty()) {
+			// Check for common typo: "PAC KEY" with space instead of underscore
+			if (std::regex_search(query_lower, std::regex(R"(\bpac\s+key\b)"))) {
+				throw ParserException("Did you mean PAC_KEY (with underscore)? "
+				                      "Use PAC_KEY (col) to define the privacy unit key.");
+			}
 			throw ParserException("CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit");
 		}
 	}

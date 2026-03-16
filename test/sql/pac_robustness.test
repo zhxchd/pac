@@ -444,13 +444,11 @@ PRAGMA clear_pac_metadata;
 # H. Keyword typos and wrong ordering
 # ============================================================================
 
-# H1: Space instead of underscore in PAC_KEY → DuckDB interprets "PAC" as column name
-# This will either fail as a syntax error or create a table without PAC_KEY
-# Since CREATE PU TABLE requires PAC_KEY, it should error.
+# H1: Space instead of underscore in PAC_KEY
 statement error
 CREATE PU TABLE h1 (id INTEGER, PAC KEY(id));
 ----
-CREATE PU TABLE requires a PAC_KEY clause to identify the privacy unit
+Did you mean PAC_KEY (with underscore)?
 
 # H2: No underscore → "PACKEY" is not recognized as PAC_KEY
 statement error
