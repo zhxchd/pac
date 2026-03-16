@@ -180,6 +180,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
 	// determinism)
 	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
+	db.config.AddExtensionOption("pac_check", "enforce protected column access restrictions", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
+	db.config.AddExtensionOption("pac_rewrite", "enable PAC query plan rewriting", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
 	// Add option to set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("pac_seed", "deterministic RNG seed for PAC functions", LogicalType::BIGINT);
 	// Add option to configure the number of samples (m) used by PAC (default 128)

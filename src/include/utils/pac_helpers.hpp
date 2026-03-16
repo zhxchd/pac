@@ -83,6 +83,11 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method 
 // Helper to safely retrieve boolean settings with defaults
 bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value);
 
+// Trace a ColumnBinding back through the plan to find which LogicalGet it originates from.
+// If out_column_index is provided, it will be set to the column index within the LogicalGet's column_ids.
+LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &binding,
+                                 idx_t *out_column_index = nullptr);
+
 // Return true if the given ColumnBinding in a logical plan ultimately originates from the
 // specified base table name (i.e., from a LogicalGet of that table), false otherwise.
 // This resolves bindings via table_index back to the source LogicalGet nodes.

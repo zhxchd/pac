@@ -340,6 +340,36 @@ ORDER BY s_suppkey;
 2	Supplier#002
 3	Supplier#003
 
+# ============================================================
+# Test 10: CTE that does NOT expose PAC_KEY columns
+# Tests: CTE projects only non-key columns (grp, value) from
+# a PU table. The PAC compiler must expand the CTE definition
+# to include the missing PAC_KEY column so noise can be applied.
+# Without the fix, the aggregate would silently skip noising.
+# ============================================================
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+CREATE PU TABLE scores (id INT, grp INT, value INT, PAC_KEY(id), PROTECTED(value));
+
+statement ok
+INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
+
+# CTE only selects grp and value — PAC_KEY 'id' is NOT projected.
+# The aggregate should still be noised (pac_noised_sum) after CTE expansion.
+query II
+WITH data AS (
+    SELECT grp, value FROM scores
+)
+SELECT grp, SUM(value) AS total FROM data GROUP BY grp ORDER BY grp;
+----
+1	40
+2	60
+
+statement ok
+DROP TABLE scores;
+
 # Cleanup
 statement ok
 DROP TABLE lineitem;

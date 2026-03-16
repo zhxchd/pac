@@ -28,6 +28,8 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
@@ -183,6 +185,167 @@ struct CTEHashMatch {
 	}
 };
 
+// Collect all CTE_REF nodes in the plan that reference a given cte_index.
+static void CollectCTERefs(LogicalOperator *op, idx_t target_cte_index, vector<LogicalCTERef *> &refs) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &ref = op->Cast<LogicalCTERef>();
+		if (ref.cte_index == target_cte_index) {
+			refs.push_back(&ref);
+		}
+	}
+	for (auto &child : op->children) {
+		CollectCTERefs(child.get(), target_cte_index, refs);
+	}
+}
+
+// Add a column through all projections between the bottom of a subtree and its root.
+// Walks from root down to the GET, recording projections along the path, then
+// adds a pass-through expression in each projection from bottom up.
+// Returns the final ColumnBinding as seen from the top of the subtree.
+static ColumnBinding PropagateColumnThroughSubtree(LogicalOperator *root, LogicalGet &get, ColumnBinding get_binding,
+                                                   const LogicalType &col_type) {
+	// Find path from root to the GET node
+	struct PathFinder {
+		static bool Find(LogicalOperator *op, LogicalOperator *target, vector<LogicalOperator *> &path) {
+			if (op == target) {
+				return true;
+			}
+			for (auto &child : op->children) {
+				path.push_back(child.get());
+				if (Find(child.get(), target, path)) {
+					return true;
+				}
+				path.pop_back();
+			}
+			return false;
+		}
+	};
+
+	vector<LogicalOperator *> path;
+	path.push_back(root);
+	if (!PathFinder::Find(root, &get, path)) {
+		return get_binding;
+	}
+
+	// Walk from bottom (just above GET) to top, adding column through projections
+	ColumnBinding current = get_binding;
+	for (int i = static_cast<int>(path.size()) - 1; i >= 0; i--) {
+		auto *op = path[i];
+		if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			auto &proj = op->Cast<LogicalProjection>();
+			// Add a pass-through expression for this column
+			idx_t new_idx = proj.expressions.size();
+			proj.expressions.push_back(make_uniq<BoundColumnRefExpression>(col_type, current));
+			current = ColumnBinding(proj.table_index, new_idx);
+			proj.ResolveOperatorTypes();
+		}
+		// FILTER and other operators pass bindings through unchanged
+	}
+	return current;
+}
+
+// Expand a CTE definition to include missing PAC_KEY columns so that CTE_REF nodes
+// expose them for hashing. This modifies the MATERIALIZED_CTE's definition (child[0]),
+// the GET node's column_ids, intermediate projections, and all CTE_REF nodes.
+static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef &ref, const string &table_name,
+                                 const vector<string> &columns) {
+	// Find the MATERIALIZED_CTE that defines this CTE
+	auto *mat_cte = FindMaterializedCTE(plan_root, ref.cte_index);
+	if (!mat_cte || mat_cte->children.empty()) {
+		return false;
+	}
+
+	// Find the LogicalGet for the target table in the CTE definition (child[0])
+	auto *get = FindTableScanInSubtree(mat_cte->children[0].get(), table_name);
+	if (!get) {
+		return false;
+	}
+
+	auto entry = get->GetTable();
+	if (!entry) {
+		return false;
+	}
+
+	// Figure out which columns are missing from the CTE_REF
+	vector<string> missing_cols;
+	for (auto &col_name : columns) {
+		bool found = false;
+		for (auto &bound_col : ref.bound_columns) {
+			if (bound_col == col_name) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			missing_cols.push_back(col_name);
+		}
+	}
+
+	if (missing_cols.empty()) {
+		return true; // Already all present
+	}
+
+	// For each missing column, add it to the GET and propagate through the CTE definition
+	for (auto &col_name : missing_cols) {
+		// Find the column in the table's catalog entry
+		column_t col_oid = COLUMN_IDENTIFIER_ROW_ID; // sentinel
+		LogicalType col_type = LogicalType::INVALID;
+		auto &catalog_columns = entry->GetColumns();
+		for (auto &col : catalog_columns.Logical()) {
+			if (col.Name() == col_name) {
+				col_oid = col.Oid();
+				col_type = col.Type();
+				break;
+			}
+		}
+		if (col_oid == COLUMN_IDENTIFIER_ROW_ID) {
+			PAC_DEBUG_PRINT("ExpandCTEWithColumns: column '" + col_name + "' not found in table '" + table_name + "'");
+			return false;
+		}
+
+		// Add column to GET's column_ids
+		idx_t new_col_idx = get->GetColumnIds().size();
+		get->AddColumnId(col_oid);
+
+		// Add to projection_ids if the GET uses them
+		if (!get->projection_ids.empty()) {
+			get->projection_ids.push_back(new_col_idx);
+		}
+
+		get->ResolveOperatorTypes();
+
+		// The GET now outputs this column at binding (get->table_index, new_output_idx)
+		// If projection_ids is non-empty, the output index is projection_ids.size()-1
+		// Otherwise it's column_ids.size()-1
+		idx_t get_output_idx =
+		    get->projection_ids.empty() ? (get->GetColumnIds().size() - 1) : (get->projection_ids.size() - 1);
+		ColumnBinding get_binding(get->table_index, get_output_idx);
+
+		// Propagate through intermediate operators (projections, filters) in the CTE definition
+		auto top_binding = PropagateColumnThroughSubtree(mat_cte->children[0].get(), *get, get_binding, col_type);
+
+		// Update MATERIALIZED_CTE column_count
+		mat_cte->column_count++;
+
+		// Update ALL CTE_REF nodes that reference this CTE
+		vector<LogicalCTERef *> all_refs;
+		CollectCTERefs(plan_root, ref.cte_index, all_refs);
+		for (auto *cte_ref : all_refs) {
+			cte_ref->bound_columns.push_back(col_name);
+			cte_ref->chunk_types.push_back(col_type);
+			cte_ref->ResolveOperatorTypes();
+		}
+
+		PAC_DEBUG_PRINT("ExpandCTEWithColumns: added column '" + col_name + "' (oid=" + std::to_string(col_oid) +
+		                ") to CTE index " + std::to_string(ref.cte_index));
+	}
+
+	return true;
+}
+
 // Walk an operator's subtree to find a CTE_SCAN that can provide hash columns for a PU.
 // Two paths are tried for each CTE_SCAN:
 //   1. CTE directly contains the PU table → hash PU PK columns
@@ -191,7 +354,7 @@ struct CTEHashMatch {
 // projection there corrupts the DELIM_JOIN/DELIM_GET statistics pairing.
 static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_table_name, const vector<string> &pu_pks,
                                       const CTETableMap &cte_map, const PACCompatibilityResult &check,
-                                      bool inside_delim_join = false) {
+                                      LogicalOperator *plan_root = nullptr, bool inside_delim_join = false) {
 	if (!op) {
 		return CTEHashMatch();
 	}
@@ -203,8 +366,17 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 			auto &cte_tables = cte_it->second;
 
 			// Path 1: CTE directly contains PU table → use PU PK columns
-			if (cte_tables.count(pu_table_name) > 0 && CTERefExposesColumns(ref, pu_pks)) {
-				return CTEHashMatch(&ref, pu_pks);
+			if (cte_tables.count(pu_table_name) > 0) {
+				if (CTERefExposesColumns(ref, pu_pks)) {
+					return CTEHashMatch(&ref, pu_pks);
+				}
+				// CTE contains the PU table but doesn't expose PAC_KEY columns.
+				// Try expanding the CTE definition to include the missing columns.
+				if (plan_root && ExpandCTEWithColumns(plan_root, ref, pu_table_name, pu_pks)) {
+					if (CTERefExposesColumns(ref, pu_pks)) {
+						return CTEHashMatch(&ref, pu_pks);
+					}
+				}
 			}
 			// Path 2: CTE contains FK-linked table → use FK columns
 			// Sort FK path keys for deterministic behavior across platforms
@@ -248,7 +420,7 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 	}
 	for (auto &child : op->children) {
 		bool child_in_delim = inside_delim_join || (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN);
-		auto match = FindCTEHashSource(child.get(), pu_table_name, pu_pks, cte_map, check, child_in_delim);
+		auto match = FindCTEHashSource(child.get(), pu_table_name, pu_pks, cte_map, check, plan_root, child_in_delim);
 		if (match) {
 			return match;
 		}
@@ -500,7 +672,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 					continue;
 				}
 
-				auto match = FindCTEHashSource(target_agg, pu_table_name, pu_pks, cte_map, check);
+				auto match = FindCTEHashSource(target_agg, pu_table_name, pu_pks, cte_map, check, plan.get());
 				if (!match) {
 					continue;
 				}
