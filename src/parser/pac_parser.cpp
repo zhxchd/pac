@@ -215,10 +215,16 @@ static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &da
  * also contain keywords like "protected" that might match ADD patterns.
  */
 ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionInfo *info, const string &query) {
-	// Clean up query - preserve spaces but remove semicolons and newlines
+	// Clean up query - preserve spaces but remove semicolons, comments, and newlines
 	string clean_query = query;
 	// Remove semicolons
 	clean_query.erase(std::remove(clean_query.begin(), clean_query.end(), ';'), clean_query.end());
+	// Strip SQL line comments (-- ...) before collapsing newlines, so comment text
+	// doesn't leak into keyword detection (e.g. "-- PAC_LINKs define..." would falsely
+	// trigger PAC_LINK detection)
+	clean_query = std::regex_replace(clean_query, std::regex(R"(--[^\n]*)"), " ");
+	// Strip block comments (/* ... */)
+	clean_query = std::regex_replace(clean_query, std::regex(R"(/\*[\s\S]*?\*/)"), " ");
 	// Replace newlines with spaces
 	std::replace(clean_query.begin(), clean_query.end(), '\n', ' ');
 	std::replace(clean_query.begin(), clean_query.end(), '\r', ' ');
