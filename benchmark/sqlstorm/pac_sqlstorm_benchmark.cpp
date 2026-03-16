@@ -862,6 +862,11 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 
 	Log("=== " + label + " pass: running " + std::to_string(total) + " queries ===");
 
+	// Track the last query that caused an INTERNAL error — when a subsequent
+	// query hits "database has been invalidated" (FATAL), the real culprit is
+	// the INTERNAL-error query, not the victim that triggered the FATAL.
+	string last_internal_error_query;
+
 	for (int i = 0; i < total; ++i) {
 		// Ensure worker is alive
 		if (worker.child_pid <= 0) {
@@ -891,18 +896,37 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 			stats.success++;
 			stats.total_success_time += qr.time_ms;
 			if (qr.pac_applied) stats.pac_applied++;
+			last_internal_error_query.clear();
 		} else if (qr.state == "timeout") {
 			stats.timed_out++;
+			last_internal_error_query.clear();
 			// Kill child to reclaim memory; will be restarted next iteration
 			if (worker.child_pid > 0) {
 				worker.Stop();
 			}
 		} else if (qr.state == "crash") {
 			stats.crashed++;
-			Log("Query " + name + " crashed child process: " + qr.error);
+			if (!last_internal_error_query.empty()) {
+				Log("Query " + name + " hit invalidated DB (root cause: " + last_internal_error_query + "): " + qr.error);
+				// Also track the root-cause query as a crash
+				BenchmarkQueryResult root_qr;
+				root_qr.name = last_internal_error_query;
+				root_qr.state = "crash";
+				root_qr.error = "INTERNAL error that invalidated the database (victim: " + name + ")";
+				TrackQueryErrors(stats, root_qr);
+				last_internal_error_query.clear();
+			} else {
+				Log("Query " + name + " crashed child process: " + qr.error);
+			}
 			// Child already dead; will be restarted next iteration
 		} else {
 			stats.failed++;
+			// Track INTERNAL errors as potential root causes for subsequent crashes
+			if (qr.error.find("INTERNAL") != string::npos) {
+				last_internal_error_query = name;
+			} else {
+				last_internal_error_query.clear();
+			}
 		}
 
 		TrackQueryErrors(stats, qr);
